@@ -3,6 +3,9 @@ module github.com/ayn2op/discordo
 go 1.25.3
 
 // replace github.com/ayn2op/tview => ../tview
+replace github.com/diamondburned/arikawa/v3 => ../arikawa
+
+replace github.com/diamondburned/ningen/v3 => ../ningen
 
 require (
 	github.com/BurntSushi/toml v1.6.0
