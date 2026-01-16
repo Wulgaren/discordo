@@ -200,14 +200,20 @@ func (gt *guildsTree) onSelected(node *tview.TreeNode) {
 			return
 		}
 
-		go gt.chatView.state.ReadState.MarkRead(channel.ID, channel.LastMessageID)
-
 		limit := gt.cfg.MessagesLimit
 		messages, err := gt.chatView.state.Messages(channel.ID, uint(limit))
 		if err != nil {
 			slog.Error("failed to get messages", "err", err, "channel_id", channel.ID, "limit", limit)
 			return
 		}
+
+		// Mark as read using the actual last message ID from loaded messages
+		// If messages are loaded, use the first (most recent) message ID, otherwise use channel's LastMessageID
+		lastMessageID := channel.LastMessageID
+		if len(messages) > 0 {
+			lastMessageID = messages[0].ID
+		}
+		go gt.chatView.state.ReadState.MarkRead(channel.ID, lastMessageID)
 
 		if guildID := channel.GuildID; guildID.IsValid() {
 			gt.chatView.messagesList.requestGuildMembers(guildID, messages)
