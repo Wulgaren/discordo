@@ -94,10 +94,17 @@ func (v *View) buildLayout() {
 		SetDirection(tview.FlexRow).
 		AddItem(v.messagesList, 0, 1, false).
 		AddItem(v.messageInput, 3, 1, false)
-	// The guilds tree is always focused first at start-up.
-	v.mainFlex.
-		AddItem(v.guildsTree, 0, 1, true).
-		AddItem(v.rightFlex, 0, 4, false)
+	
+	// Add guilds tree only if not hidden on startup
+	if !v.cfg.HideGuildsTreeOnStartup {
+		// The guilds tree is always focused first at start-up.
+		v.mainFlex.
+			AddItem(v.guildsTree, 0, 1, true).
+			AddItem(v.rightFlex, 0, 4, false)
+	} else {
+		v.mainFlex.
+			AddItem(v.rightFlex, 0, 1, true)
+	}
 
 	v.AddAndSwitchToPage(flexPageName, v.mainFlex, true)
 }
@@ -107,10 +114,14 @@ func (v *View) toggleGuildsTree() {
 	if v.mainFlex.GetItemCount() == 2 {
 		v.mainFlex.RemoveItem(v.guildsTree)
 		if v.guildsTree.HasFocus() {
-			v.app.SetFocus(v.mainFlex)
+			v.app.SetFocus(v.messagesList)
 		}
 	} else {
-		v.buildLayout()
+		// Show the guilds tree (regardless of startup config)
+		v.mainFlex.Clear()
+		v.mainFlex.
+			AddItem(v.guildsTree, 0, 1, false).
+			AddItem(v.rightFlex, 0, 4, false)
 		v.app.SetFocus(v.guildsTree)
 	}
 }

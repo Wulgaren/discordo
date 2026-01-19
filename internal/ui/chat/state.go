@@ -108,7 +108,13 @@ func (v *View) onReady(r *gateway.ReadyEvent) {
 	}
 
 	v.guildsTree.SetCurrentNode(root)
-	v.app.SetFocus(v.guildsTree)
+	// Only focus guilds tree if it's visible
+	if !v.cfg.HideGuildsTreeOnStartup {
+		v.app.SetFocus(v.guildsTree)
+	} else {
+		// Focus messages list if guilds tree is hidden
+		v.app.SetFocus(v.messagesList)
+	}
 	v.app.Draw()
 }
 

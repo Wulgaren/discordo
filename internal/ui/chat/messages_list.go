@@ -350,6 +350,16 @@ func (ml *messagesList) onInputCapture(event *tcell.EventKey) *tcell.EventKey {
 		return nil
 	}
 
+	// Support arrow keys directly as an alternative to configured keys
+	switch event.Key() {
+	case tcell.KeyUp:
+		ml.handleSelectPrevious()
+		return nil
+	case tcell.KeyDown:
+		ml._select(ml.cfg.Keys.MessagesList.SelectNext)
+		return nil
+	}
+
 	return event
 }
 

@@ -303,6 +303,21 @@ func (gt *guildsTree) onInputCapture(event *tcell.EventKey) *tcell.EventKey {
 		gt.yankID()
 	}
 
+	// Support arrow keys directly as an alternative to configured keys
+	switch event.Key() {
+	case tcell.KeyUp:
+		return tcell.NewEventKey(tcell.KeyUp, "", tcell.ModNone)
+	case tcell.KeyDown:
+		return tcell.NewEventKey(tcell.KeyDown, "", tcell.ModNone)
+	case tcell.KeyLeft:
+		// Left arrow collapses parent node (similar to collapse_parent_node)
+		gt.collapseParentNode(gt.GetCurrentNode())
+		return nil
+	case tcell.KeyRight:
+		// Right arrow expands/selects current node (similar to select_current)
+		return tcell.NewEventKey(tcell.KeyEnter, "", tcell.ModNone)
+	}
+
 	return nil
 }
 
