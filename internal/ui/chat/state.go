@@ -127,6 +127,12 @@ func (v *View) onMessageCreate(message *gateway.MessageCreateEvent) {
 		v.state.ReadState.MarkUnread(message.ChannelID, message.ID, mentions)
 	}
 	
+	// Send notification regardless of whether channel is selected
+	// The Notify function has its own logic to determine if notification should be sent
+	if err := notifications.Notify(v.state, message, v.cfg); err != nil {
+		slog.Error("failed to notify", "err", err, "channel_id", message.ChannelID, "message_id", message.ID)
+	}
+	
 	if selectedChannel != nil && selectedChannel.ID == message.ChannelID {
 		v.removeTyper(message.Author.ID)
 		v.app.QueueUpdateDraw(func() {
@@ -136,9 +142,6 @@ func (v *View) onMessageCreate(message *gateway.MessageCreateEvent) {
 			v.refreshChannelNodeStyle(message.ChannelID)
 		})
 	} else {
-		if err := notifications.Notify(v.state, message, v.cfg); err != nil {
-			slog.Error("failed to notify", "err", err, "channel_id", message.ChannelID, "message_id", message.ID)
-		}
 		v.app.QueueUpdateDraw(func() {
 			v.refreshChannelNodeStyle(message.ChannelID)
 		})
