@@ -138,6 +138,9 @@ func (v *View) toggleQuickSwitcher() {
 		v.quickSwitcher.list.Clear()
 		v.quickSwitcher.candidates = nil
 		
+		// Update list to show unread channels when opened
+		v.quickSwitcher.updateAutocompleteList("")
+		
 		// Create centered modal
 		centered := ui.Centered(v.quickSwitcher, 60, 15)
 		
