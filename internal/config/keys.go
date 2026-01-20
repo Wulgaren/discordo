@@ -68,7 +68,6 @@ type (
 	}
 
 	MentionsListKeys struct {
-		Up   string `toml:"up"`
-		Down string `toml:"down"`
+		SelectionKeys
 	}
 )

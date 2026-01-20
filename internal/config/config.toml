@@ -116,8 +116,17 @@ open_editor = "Ctrl+E"
 open_file_picker = "Ctrl+Rune[\\]"
 
 [keys.mentions_list]
+select_previous = "Ctrl+P"
+select_next = "Ctrl+N"
+select_first = "Home"
+select_last = "End"
+
+[keys.picker]
+open = "Ctrl+K"
+cancel = "Esc"
 up = "Ctrl+P"
 down = "Ctrl+N"
+confirm = "Enter"
 
 # style = { foreground = "", background = "", attributes = "" or [""] }
 [theme.title]
@@ -155,6 +164,8 @@ mention_style = { foreground = "blue" }
 emoji_style = { foreground = "green" }
 url_style = { foreground = "blue" }
 attachment_style = { foreground = "yellow" }
+message_style = {}
+selected_message_style = { attributes = "reverse" }
 
 [theme.mentions_list]
 # Note: width and height are capped to the avaliable space
