@@ -13,7 +13,7 @@ import (
 	"github.com/sahilm/fuzzy"
 )
 
-type quickSwitcher struct {
+type picker struct {
 	*tview.Flex
 	view *View
 	cfg  *config.Config
@@ -24,37 +24,34 @@ type quickSwitcher struct {
 	candidates []channelCandidate
 }
 
-func newQuickSwitcher(view *View, cfg *config.Config) *quickSwitcher {
-	qs := &quickSwitcher{
+func newPicker(view *View, cfg *config.Config) *picker {
+	p := &picker{
 		Flex: tview.NewFlex(),
 		view: view,
 		cfg:  cfg,
 	}
 
-	qs.Flex.Box = ui.ConfigureBox(tview.NewBox(), &cfg.Theme)
+	p.Box = ui.ConfigureBox(tview.NewBox(), &cfg.Theme)
 
 	// Create input field
-	qs.inputField = tview.NewInputField()
-	qs.inputField.SetFieldBackgroundColor(tview.Styles.PrimitiveBackgroundColor)
-	qs.inputField.SetFieldTextColor(tview.Styles.PrimaryTextColor)
-	qs.inputField.SetLabel("Jump to: ")
-	qs.inputField.SetChangedFunc(qs.onInputChanged)
-	qs.inputField.SetDoneFunc(qs.onDone)
-	qs.inputField.SetInputCapture(qs.onInputFieldCapture)
+	p.inputField = tview.NewInputField()
+	p.inputField.SetLabel("> ")
+	p.inputField.SetChangedFunc(p.onInputChanged)
+	p.inputField.SetDoneFunc(p.onDone)
+	p.inputField.SetInputCapture(p.onInputFieldCapture)
 
 	// Create list for autocomplete suggestions
-	qs.list = tview.NewList()
-	qs.list.ShowSecondaryText(false)
-	qs.list.SetSelectedFunc(qs.onListSelected)
-	qs.list.SetInputCapture(qs.onListInputCapture)
+	p.list = tview.NewList()
+	p.list.ShowSecondaryText(false)
+	p.list.SetSelectedFunc(p.onListSelected)
 
 	// Build layout: input field on top, list below
-	qs.Flex.
+	p.Flex.
 		SetDirection(tview.FlexRow).
-		AddItem(qs.inputField, 1, 0, true).
-		AddItem(qs.list, 0, 1, false)
+		AddItem(p.inputField, 1, 0, true).
+		AddItem(p.list, 0, 1, false)
 
-	return qs
+	return p
 }
 
 type channelCandidate struct {
@@ -82,9 +79,9 @@ func (c channelCandidate) displayText() string {
 }
 
 // isUnread checks if a channel is unread using ChannelIsUnread which automatically excludes muted channels
-func (qs *quickSwitcher) isUnread(channelID discord.ChannelID) (bool, bool) {
+func (p *picker) isUnread(channelID discord.ChannelID) (bool, bool) {
 	// Use ChannelIsUnread with default options (excludes muted channels)
-	indication := qs.view.state.ChannelIsUnread(channelID, ningen.UnreadOpts{})
+	indication := p.view.state.ChannelIsUnread(channelID, ningen.UnreadOpts{})
 	if indication == ningen.ChannelMentioned {
 		return true, true // mentioned (which is also unread)
 	}
@@ -95,10 +92,10 @@ func (qs *quickSwitcher) isUnread(channelID discord.ChannelID) (bool, bool) {
 }
 
 // isMuted checks if a channel is muted by comparing unread status with and without IncludeMutedCategories
-func (qs *quickSwitcher) isMuted(channelID discord.ChannelID) bool {
+func (p *picker) isMuted(channelID discord.ChannelID) bool {
 	// If channel is unread with muted categories but not with default options, it's muted
-	withMuted := qs.view.state.ChannelIsUnread(channelID, ningen.UnreadOpts{IncludeMutedCategories: true})
-	withoutMuted := qs.view.state.ChannelIsUnread(channelID, ningen.UnreadOpts{})
+	withMuted := p.view.state.ChannelIsUnread(channelID, ningen.UnreadOpts{IncludeMutedCategories: true})
+	withoutMuted := p.view.state.ChannelIsUnread(channelID, ningen.UnreadOpts{})
 	
 	// If it's unread with muted categories but read without, it means it's muted
 	return (withMuted == ningen.ChannelUnread || withMuted == ningen.ChannelMentioned) &&
@@ -106,10 +103,10 @@ func (qs *quickSwitcher) isMuted(channelID discord.ChannelID) bool {
 }
 
 // isGuildMuted checks if a guild is muted by comparing unread status with and without IncludeMutedCategories
-func (qs *quickSwitcher) isGuildMuted(guildID discord.GuildID) bool {
+func (p *picker) isGuildMuted(guildID discord.GuildID) bool {
 	// If guild is unread with muted categories but not with default options, it's muted
-	withMuted := qs.view.state.GuildIsUnread(guildID, ningen.GuildUnreadOpts{UnreadOpts: ningen.UnreadOpts{IncludeMutedCategories: true}})
-	withoutMuted := qs.view.state.GuildIsUnread(guildID, ningen.GuildUnreadOpts{UnreadOpts: ningen.UnreadOpts{}})
+	withMuted := p.view.state.GuildIsUnread(guildID, ningen.GuildUnreadOpts{UnreadOpts: ningen.UnreadOpts{IncludeMutedCategories: true}})
+	withoutMuted := p.view.state.GuildIsUnread(guildID, ningen.GuildUnreadOpts{UnreadOpts: ningen.UnreadOpts{}})
 	
 	// If it's unread with muted categories but read without, it means it's muted
 	// GuildIsUnread returns UnreadIndication (same as ChannelIsUnread)
@@ -117,13 +114,13 @@ func (qs *quickSwitcher) isGuildMuted(guildID discord.GuildID) bool {
 		(withoutMuted == ningen.ChannelRead)
 }
 
-func (qs *quickSwitcher) onInputChanged(text string) {
-	qs.updateAutocompleteList(text)
+func (p *picker) onInputChanged(text string) {
+	p.updateAutocompleteList(text)
 }
 
-func (qs *quickSwitcher) updateAutocompleteList(currentText string) {
-	if qs.view.state == nil || qs.view.state.Cabinet == nil {
-		qs.list.Clear()
+func (p *picker) updateAutocompleteList(currentText string) {
+	if p.view.state == nil || p.view.state.Cabinet == nil {
+		p.list.Clear()
 		return
 	}
 
@@ -131,20 +128,26 @@ func (qs *quickSwitcher) updateAutocompleteList(currentText string) {
 
 	// Build list of all non-muted channels
 	// Guild Channels
-	guilds, _ := qs.view.state.Cabinet.Guilds()
+	guilds, err := p.view.state.Cabinet.Guilds()
+	if err != nil {
+		return
+	}
 	for _, guild := range guilds {
 		// Skip muted guilds
-		if qs.isGuildMuted(guild.ID) {
+		if p.isGuildMuted(guild.ID) {
 			continue
 		}
-		channels, _ := qs.view.state.Cabinet.Channels(guild.ID)
+		channels, err := p.view.state.Cabinet.Channels(guild.ID)
+		if err != nil {
+			continue
+		}
 		for _, ch := range channels {
 			if ch.Type == discord.GuildText || ch.Type == discord.GuildNews || ch.Type == discord.GuildPublicThread || ch.Type == discord.GuildPrivateThread || ch.Type == discord.GuildAnnouncementThread {
 				// Skip muted channels
-				if qs.isMuted(ch.ID) {
+				if p.isMuted(ch.ID) {
 					continue
 				}
-				unread, mentioned := qs.isUnread(ch.ID)
+				unread, mentioned := p.isUnread(ch.ID)
 				candidates = append(candidates, channelCandidate{
 					name:      "#" + ch.Name,
 					guildName: guild.Name,
@@ -157,10 +160,13 @@ func (qs *quickSwitcher) updateAutocompleteList(currentText string) {
 	}
 
 	// DM Channels
-	privateChannels, _ := qs.view.state.PrivateChannels()
+	privateChannels, err := p.view.state.PrivateChannels()
+	if err != nil {
+		return
+	}
 	for _, ch := range privateChannels {
 		// Skip muted channels
-		if qs.isMuted(ch.ID) {
+		if p.isMuted(ch.ID) {
 			continue
 		}
 		name := "Direct Message"
@@ -171,7 +177,7 @@ func (qs *quickSwitcher) updateAutocompleteList(currentText string) {
 			name = ch.Name
 		}
 
-		unread, mentioned := qs.isUnread(ch.ID)
+		unread, mentioned := p.isUnread(ch.ID)
 		candidates = append(candidates, channelCandidate{
 			name:      name,
 			guildName: "Direct Messages",
@@ -204,12 +210,7 @@ func (qs *quickSwitcher) updateAutocompleteList(currentText string) {
 		})
 	} else {
 		// When there's text, use fuzzy search on all non-muted channels
-		var candidateStrings []string
-		for _, c := range candidates {
-			candidateStrings = append(candidateStrings, c.String())
-		}
-
-		matches := fuzzy.Find(currentText, candidateStrings)
+		matches := fuzzy.FindFrom(currentText, candidateList(candidates))
 		sort.SliceStable(matches, func(i, j int) bool {
 			return matches[i].Score > matches[j].Score
 		})
@@ -222,103 +223,81 @@ func (qs *quickSwitcher) updateAutocompleteList(currentText string) {
 		candidates = matchedCandidates
 	}
 
-	qs.candidates = candidates
+	p.candidates = candidates
 
-	if len(qs.candidates) > 10 {
-		qs.candidates = qs.candidates[:10]
+	if len(p.candidates) > 10 {
+		p.candidates = p.candidates[:10]
 	}
 
 	// Update the list
-	qs.list.Clear()
-	for _, candidate := range qs.candidates {
+	p.list.Clear()
+	for _, candidate := range p.candidates {
 		text := candidate.displayText()
-		qs.list.AddItem(text, "", 0, nil)
+		p.list.AddItem(text, "", 0, nil)
 	}
 
-	// If there are suggestions, switch focus to list when arrow key is pressed
-	if len(qs.candidates) > 0 {
-		qs.list.SetCurrentItem(0)
-	}
-}
-
-func (qs *quickSwitcher) onListSelected(index int, mainText, secondaryText string, shortcut rune) {
-	if index >= 0 && index < len(qs.candidates) {
-		candidate := qs.candidates[index]
-		qs.view.guildsTree.SelectChannelID(candidate.id)
-		qs.view.toggleQuickSwitcher()
+	// Reset list selection to first item when candidates are updated
+	if len(p.candidates) > 0 {
+		p.list.SetCurrentItem(0)
 	}
 }
 
-func (qs *quickSwitcher) onListInputCapture(event *tcell.EventKey) *tcell.EventKey {
-	switch event.Key() {
-	case tcell.KeyEnter:
-		index := qs.list.GetCurrentItem()
-		if index >= 0 && index < len(qs.candidates) {
-			candidate := qs.candidates[index]
-			qs.view.guildsTree.SelectChannelID(candidate.id)
-			qs.view.toggleQuickSwitcher()
+type candidateList []channelCandidate
+
+func (cl candidateList) String(i int) string {
+	return cl[i].String()
+}
+
+func (cl candidateList) Len() int {
+	return len(cl)
+}
+
+func (p *picker) onListSelected(index int, mainText, secondaryText string, shortcut rune) {
+	if index >= 0 && index < len(p.candidates) {
+		candidate := p.candidates[index]
+		p.view.guildsTree.SelectChannelID(candidate.id)
+		p.view.togglePicker()
+	}
+}
+
+func (p *picker) onInputFieldCapture(event *tcell.EventKey) *tcell.EventKey {
+	if len(p.candidates) > 0 {
+		switch event.Name() {
+		case p.cfg.Keys.Picker.Up:
+			p.list.InputHandler()(tcell.NewEventKey(tcell.KeyUp, "", tcell.ModNone), nil)
+			return nil
+		case p.cfg.Keys.Picker.Down:
+			p.list.InputHandler()(tcell.NewEventKey(tcell.KeyDown, "", tcell.ModNone), nil)
+			return nil
+		case p.cfg.Keys.Picker.Confirm:
+			index := p.list.GetCurrentItem()
+			if index >= 0 && index < len(p.candidates) {
+				candidate := p.candidates[index]
+				p.view.guildsTree.SelectChannelID(candidate.id)
+				p.view.togglePicker()
+			}
+			return nil
 		}
+	}
+
+	switch event.Name() {
+	case p.cfg.Keys.Picker.Cancel:
+		p.view.togglePicker()
 		return nil
-	case tcell.KeyEscape:
-		qs.view.toggleQuickSwitcher()
-		return nil
-	case tcell.KeyUp:
-		if qs.list.GetCurrentItem() == 0 {
-			// Move focus back to input field
-			qs.view.app.SetFocus(qs.inputField)
-			return nil
-		}
-	case tcell.KeyTab:
-		// Tab moves focus between input and list
-		if qs.view.app.GetFocus() == qs.inputField {
-			qs.view.app.SetFocus(qs.list)
-			return nil
-		} else if qs.view.app.GetFocus() == qs.list {
-			qs.view.app.SetFocus(qs.inputField)
-			return nil
-		}
 	}
 	return event
 }
 
-func (qs *quickSwitcher) onInputFieldCapture(event *tcell.EventKey) *tcell.EventKey {
-	switch event.Key() {
-	case tcell.KeyDown:
-		// Move focus to list if there are suggestions
-		if len(qs.candidates) > 0 {
-			qs.view.app.SetFocus(qs.list)
-			return nil
-		}
-	case tcell.KeyTab:
-		// Move focus to list if there are suggestions
-		if len(qs.candidates) > 0 {
-			qs.view.app.SetFocus(qs.list)
-			return nil
-		}
-	}
-	return event
-}
-
-func (qs *quickSwitcher) onDone(key tcell.Key) {
+func (p *picker) onDone(key tcell.Key) {
 	switch key {
 	case tcell.KeyEnter:
 		// If there are candidates, select the first one
-		if len(qs.candidates) > 0 {
-			candidate := qs.candidates[0]
-			qs.view.guildsTree.SelectChannelID(candidate.id)
-			qs.view.toggleQuickSwitcher()
-		} else {
-			// Try to match exact text
-			text := qs.inputField.GetText()
-			for _, c := range qs.candidates {
-				if c.String() == text {
-					qs.view.guildsTree.SelectChannelID(c.id)
-					qs.view.toggleQuickSwitcher()
-					return
-				}
-			}
+		if len(p.candidates) > 0 {
+			candidate := p.candidates[0]
+			p.view.guildsTree.SelectChannelID(candidate.id)
+			p.view.togglePicker()
 		}
 	case tcell.KeyEscape:
-		qs.view.toggleQuickSwitcher()
+		p.view.togglePicker()
 	}
 }
