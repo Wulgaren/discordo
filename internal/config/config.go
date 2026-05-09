@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"unicode/utf8"
 
 	"github.com/BurntSushi/toml"
 	"github.com/ayn2op/discordo/internal/consts"
@@ -18,6 +19,12 @@ type (
 	Timestamps struct {
 		Enabled bool   `toml:"enabled"`
 		Format  string `toml:"format"`
+	}
+
+	DateSeparator struct {
+		Enabled   bool   `toml:"enabled"`
+		Format    string `toml:"format"`
+		Character string `toml:"character"`
 	}
 
 	Notifications struct {
@@ -36,28 +43,84 @@ type (
 		Receive bool `toml:"receive"`
 	}
 
+	Icons struct {
+		GuildCategory   string `toml:"guild_category"`
+		GuildText       string `toml:"guild_text"`
+		GuildVoice      string `toml:"guild_voice"`
+		GuildStageVoice string `toml:"guild_stage_voice"`
+
+		GuildAnnouncementThread string `toml:"guild_announcement_thread"`
+		GuildPublicThread       string `toml:"guild_public_thread"`
+		GuildPrivateThread      string `toml:"guild_private_thread"`
+
+		GuildAnnouncement string `toml:"guild_announcement"`
+		GuildForum        string `toml:"guild_forum"`
+		GuildStore        string `toml:"guild_store"`
+	}
+
+	PickerConfig struct {
+		Width  int `toml:"width"`
+		Height int `toml:"height"`
+	}
+
+	MarkdownConfig struct {
+		Enabled bool   `toml:"enabled"`
+		Theme   string `toml:"theme"`
+	}
+
+	HelpConfig struct {
+		CompactModifiers bool   `toml:"compact_modifiers"`
+		Padding          [2]int `toml:"padding"`
+		Separator        string `toml:"separator"`
+	}
+
+	SidebarMarkersConfig struct {
+		Expanded  string `toml:"expanded"`
+		Collapsed string `toml:"collapsed"`
+		Leaf      string `toml:"leaf"`
+	}
+
+	SidebarIndentsConfig struct {
+		Guild    int `toml:"guild"`
+		Category int `toml:"category"`
+		Channel  int `toml:"channel"`
+		Forum    int `toml:"forum"`
+		GroupDM  int `toml:"group_dm"`
+		DM       int `toml:"dm"`
+	}
+
+	SidebarConfig struct {
+		Markers SidebarMarkersConfig `toml:"markers"`
+		Indents SidebarIndentsConfig `toml:"indents"`
+	}
+
 	Config struct {
 		AutoFocus bool   `toml:"auto_focus"`
 		Mouse     bool   `toml:"mouse"`
 		Editor    string `toml:"editor"`
 
-		Status discord.Status `toml:"status"`
-
-		Markdown            bool `toml:"markdown"`
-		HideBlockedUsers    bool `toml:"hide_blocked_users"`
-		ShowAttachmentLinks bool `toml:"show_attachment_links"`
-		HideGuildsTreeOnStartup bool `toml:"hide_guilds_tree_on_startup"`
+		Status              discord.Status `toml:"status"`
+		HideBlockedUsers    bool           `toml:"hide_blocked_users"`
+		ShowAttachmentLinks bool           `toml:"show_attachment_links"`
+		HideGuildsTreeOnStartup bool      `toml:"hide_guilds_tree_on_startup"`
 
 		// Use 0 to disable
 		AutocompleteLimit uint8 `toml:"autocomplete_limit"`
 		MessagesLimit     uint8 `toml:"messages_limit"`
 
+		Markdown        MarkdownConfig  `toml:"markdown"`
+		Help            HelpConfig      `toml:"help"`
+		Picker          PickerConfig    `toml:"picker"`
 		Timestamps      Timestamps      `toml:"timestamps"`
+		DateSeparator   DateSeparator   `toml:"date_separator"`
 		Notifications   Notifications   `toml:"notifications"`
 		TypingIndicator TypingIndicator `toml:"typing_indicator"`
+		Sidebar         SidebarConfig   `toml:"sidebar"`
 
-		Keys  Keys  `toml:"keys"`
-		Theme Theme `toml:"theme"`
+		Icons Icons `toml:"icons"`
+
+		Keybinds Keybinds `toml:"keybinds"`
+		Theme    Theme    `toml:"theme"`
 	}
 )
 
@@ -79,7 +142,9 @@ func DefaultPath() string {
 
 // Load reads the configuration file and parses it.
 func Load(path string) (*Config, error) {
-	var cfg Config
+	cfg := Config{
+		Keybinds: defaultKeybinds(),
+	}
 	if err := toml.Unmarshal(defaultCfg, &cfg); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal default config: %w", err)
 	}
@@ -116,4 +181,19 @@ func applyDefaults(cfg *Config) {
 	if cfg.Status == "default" {
 		cfg.Status = discord.UnknownStatus
 	}
+
+	if cfg.DateSeparator.Format == "" {
+		cfg.DateSeparator.Format = "January 2, 2006"
+	}
+	if cfg.DateSeparator.Character == "" {
+		cfg.DateSeparator.Character = "─"
+		return
+	}
+
+	r, _ := utf8.DecodeRuneInString(cfg.DateSeparator.Character)
+	if r == utf8.RuneError {
+		cfg.DateSeparator.Character = "─"
+		return
+	}
+	cfg.DateSeparator.Character = string(r)
 }

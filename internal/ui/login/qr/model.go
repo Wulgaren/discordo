@@ -1,0 +1,166 @@
+package qr
+
+import (
+	"crypto/rsa"
+	"strings"
+	"time"
+
+	"github.com/ayn2op/tview"
+	"github.com/ayn2op/tview/tabs"
+	"github.com/gdamore/tcell/v3"
+	"github.com/gorilla/websocket"
+	"github.com/skip2/go-qrcode"
+)
+
+type Model struct {
+	*tview.TextView
+
+	conn              *websocket.Conn
+	heartbeatInterval time.Duration
+	privateKey        *rsa.PrivateKey
+	fingerprint       string
+
+	qrCode *qrcode.QRCode
+	msg    string
+}
+
+func NewModel() *Model {
+	m := &Model{
+		TextView: tview.NewTextView(),
+	}
+	m.
+		SetScrollable(true).
+		SetWrap(false).
+		SetTextAlign(tview.AlignmentCenter)
+
+	m.msg = "Press Ctrl+N to open QR login"
+	return m
+}
+
+var _ tabs.Tab = (*Model)(nil)
+
+func (m *Model) Label() string {
+	return "QR"
+}
+
+func (m *Model) Update(msg tview.Msg) tview.Cmd {
+	switch msg := msg.(type) {
+	case tview.InitMsg:
+		m.msg = "Connecting to Remote Auth Gateway..."
+		return m.connect()
+	case tview.KeyMsg:
+		if msg.Key() == tcell.KeyEsc {
+			m.msg = "Canceled"
+			return tview.Batch(m.close(), nil)
+		}
+		return m.TextView.Update(msg)
+
+	case connCreateMsg:
+		m.conn = msg.conn
+		m.msg = "Connected. Handshaking..."
+		return m.listen()
+	case connCloseMsg:
+		m.conn = nil
+		return nil
+
+	case helloMsg:
+		m.heartbeatInterval = time.Duration(msg.heartbeatInterval) * time.Millisecond
+		return tview.Batch(m.listen(), m.heartbeat(), m.generatePrivateKey())
+	case privateKeyMsg:
+		m.privateKey = msg.privateKey
+		return tview.Batch(m.listen(), m.sendInit())
+	case nonceProofMsg:
+		return tview.Batch(m.listen(), m.sendNonceProof(msg.encryptedNonce))
+	case pendingRemoteInitMsg:
+		m.fingerprint = msg.fingerprint
+		return tview.Batch(m.listen(), m.generateQRCode(msg.fingerprint))
+	case qrCodeMsg:
+		m.qrCode = msg.qrCode
+		m.msg = "Scan this with the Discord mobile app to log in instantly."
+		return m.listen()
+	case pendingTicketMsg:
+		return tview.Batch(m.listen(), m.decryptUserPayload(msg.encryptedUserPayload))
+	case userMsg:
+		name := msg.username
+		if msg.discriminator != "0" {
+			name += "#" + msg.discriminator
+		}
+		m.msg = "Check your phone! Logging in as " + name
+		return m.listen()
+	case pendingLoginMsg:
+		m.msg = "Authenticating..."
+		return tview.Batch(m.close(), m.exchangeTicket(msg.ticket))
+	case cancelMsg:
+		m.msg = "Login canceled on mobile"
+		return m.close()
+
+	case heartbeatTickMsg:
+		if m.conn == nil {
+			return nil
+		}
+		return tview.Batch(m.heartbeat(), m.sendHeartbeat())
+
+	case errMsg:
+		m.msg = msg.err.Error()
+		return m.close()
+	}
+
+	return nil
+}
+
+func (m *Model) View(screen tcell.Screen) {
+	var contents []string
+	if m.qrCode != nil {
+		bitmap := m.qrCode.Bitmap()
+		var b strings.Builder
+		for y := 0; y < len(bitmap); y += 2 {
+			for x := range bitmap[y] {
+				top := bitmap[y][x]
+				bottom := false
+				if y+1 < len(bitmap) {
+					bottom = bitmap[y+1][x]
+				}
+				if top && bottom {
+					b.WriteString("█")
+				} else if top && !bottom {
+					b.WriteString("▀")
+				} else if !top && bottom {
+					b.WriteString("▄")
+				} else {
+					b.WriteByte(' ')
+				}
+			}
+			b.WriteByte('\n')
+		}
+		contents = append(contents, b.String())
+	}
+	if m.msg != "" {
+		contents = append(contents, m.msg)
+	}
+
+	builder := tview.NewLineBuilder()
+	builder.Write(strings.Join(contents, "\n"), tcell.StyleDefault)
+	m.SetLines(m.centerLines(builder.Finish()))
+	m.TextView.View(screen)
+}
+
+func (m *Model) centerLines(lines []tview.Line) []tview.Line {
+	_, _, _, height := m.InnerRect()
+	if height == 0 {
+		height = 40
+	}
+	padding := (height - len(lines)) / 2
+	if padding < 0 {
+		padding = 0
+	} else if padding < 1 && height > len(lines) {
+		padding = 1
+	}
+	if padding == 0 {
+		return lines
+	}
+
+	centered := make([]tview.Line, 0, padding+len(lines))
+	centered = append(centered, make([]tview.Line, padding)...)
+	centered = append(centered, lines...)
+	return centered
+}

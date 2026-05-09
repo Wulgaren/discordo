@@ -1,11 +1,15 @@
 package ui
 
 import (
+	"cmp"
+	"slices"
 	"strings"
 
 	"github.com/ayn2op/discordo/internal/config"
 	"github.com/ayn2op/tview"
 	"github.com/diamondburned/arikawa/v3/discord"
+	"github.com/diamondburned/ningen/v3"
+	"github.com/gdamore/tcell/v3"
 )
 
 // ConfigureBox configures the provided box according to the provided theme.
@@ -51,14 +55,15 @@ func ConfigureBox(box *tview.Box, cfg *config.Theme) *tview.Box {
 }
 
 // Centered creates a new grid with provided primitive aligned in the center.
-func Centered(p tview.Primitive, width, height int) tview.Primitive {
+func Centered(m tview.Model, width, height int) tview.Model {
 	return tview.NewGrid().
 		SetColumns(0, width, 0).
 		SetRows(0, height, 0).
-		AddItem(p, 1, 1, 1, 1, 0, 0, true)
+		AddItem(m, 1, 1, 1, 1, 0, 0, true)
 }
 
-func ChannelToString(channel discord.Channel) string {
+func ChannelToString(channel discord.Channel, icons config.Icons, state *ningen.State) string {
+	var icon string
 	switch channel.Type {
 	case discord.DirectMessage, discord.GroupDM:
 		if channel.Name != "" {
@@ -67,23 +72,84 @@ func ChannelToString(channel discord.Channel) string {
 
 		recipients := make([]string, len(channel.DMRecipients))
 		for i, r := range channel.DMRecipients {
+			if state != nil && channel.Type == discord.DirectMessage {
+				if rel, ok := state.RelationshipState.FullRelationship(r.ID); ok && rel.Type == discord.FriendRelationship {
+					if rel.Nickname != nil && *rel.Nickname != "" {
+						recipients[i] = *rel.Nickname
+						continue
+					}
+				}
+			}
 			recipients[i] = r.DisplayOrUsername()
 		}
 
 		return strings.Join(recipients, ", ")
+
+	case discord.GuildCategory:
+		icon = icons.GuildCategory
 	case discord.GuildText:
-		return "#" + channel.Name
-	case discord.GuildVoice, discord.GuildStageVoice:
-		return "v-" + channel.Name
+		icon = icons.GuildText
+	case discord.GuildVoice:
+		icon = icons.GuildVoice
+	case discord.GuildStageVoice:
+		icon = icons.GuildStageVoice
+
+	case discord.GuildAnnouncementThread:
+		icon = icons.GuildAnnouncementThread
+	case discord.GuildPublicThread:
+		icon = icons.GuildPublicThread
+	case discord.GuildPrivateThread:
+		icon = icons.GuildPrivateThread
+
 	case discord.GuildAnnouncement:
-		return "a-" + channel.Name
-	case discord.GuildStore:
-		return "s-" + channel.Name
+		icon = icons.GuildAnnouncement
 	case discord.GuildForum:
-		return "f-" + channel.Name
-	case discord.GuildPublicThread, discord.GuildPrivateThread, discord.GuildAnnouncementThread:
-		return "t-" + channel.Name
-	default:
-		return channel.Name
+		icon = icons.GuildForum
+	case discord.GuildStore:
+		icon = icons.GuildStore
 	}
+
+	return icon + channel.Name
+}
+
+func SortGuildChannels(channels []discord.Channel) {
+	slices.SortFunc(channels, func(a, b discord.Channel) int {
+		return cmp.Compare(a.Position, b.Position)
+	})
+}
+
+func SortPrivateChannels(channels []discord.Channel) {
+	slices.SortFunc(channels, func(a, b discord.Channel) int {
+		// Descending order
+		return cmp.Compare(getMessageIDFromChannel(b), getMessageIDFromChannel(a))
+	})
+}
+
+func getMessageIDFromChannel(channel discord.Channel) discord.MessageID {
+	if channel.LastMessageID.IsValid() {
+		return channel.LastMessageID
+	}
+	return discord.MessageID(channel.ID)
+}
+
+func MergeStyle(base, overlay tcell.Style) tcell.Style {
+	fg := overlay.GetForeground()
+	if fg == tcell.ColorDefault {
+		fg = base.GetForeground()
+	}
+	bg := overlay.GetBackground()
+	if bg == tcell.ColorDefault {
+		bg = base.GetBackground()
+	}
+	style := base.Foreground(fg).Background(bg)
+	style = style.Bold(base.HasBold() || overlay.HasBold())
+	style = style.Dim(base.HasDim() || overlay.HasDim())
+	style = style.Italic(base.HasItalic() || overlay.HasItalic())
+	style = style.Blink(base.HasBlink() || overlay.HasBlink())
+	style = style.Reverse(base.HasReverse() || overlay.HasReverse())
+	style = style.StrikeThrough(base.HasStrikeThrough() || overlay.HasStrikeThrough())
+	if base.HasUnderline() || overlay.HasUnderline() {
+		style = style.Underline(true)
+	}
+	return style
 }

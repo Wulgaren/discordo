@@ -15,7 +15,7 @@ import (
 	"github.com/diamondburned/ningen/v3"
 )
 
-func Notify(state *ningen.State, message *gateway.MessageCreateEvent, cfg *config.Config) error {
+func Notify(state *ningen.State, message gateway.MessageCreateEvent, cfg *config.Config) error {
 	if !cfg.Notifications.Enabled || cfg.Status == discord.DoNotDisturbStatus {
 		return nil
 	}
@@ -79,26 +79,36 @@ func getCachedProfileImage(avatarHash discord.Hash, url string) (string, error) 
 		return "", err
 	}
 
-	path = filepath.Join(path, avatarHash+".png")
-	if _, err := os.Stat(path); err == nil {
-		return path, nil
-	}
-
-	file, err := os.Create(path)
+	root, err := os.OpenRoot(path)
 	if err != nil {
+		return "", fmt.Errorf("failed to open avatars dir: %w", err)
+	}
+	defer root.Close()
+
+	filename := avatarHash + ".png"
+	_, err = root.Stat(filename)
+	switch {
+	case err == nil:
+		return filepath.Join(path, filename), nil
+	case os.IsNotExist(err):
+		file, err := root.Create(filename)
+		if err != nil {
+			return "", err
+		}
+		defer file.Close()
+
+		resp, err := http.Get(url)
+		if err != nil {
+			return "", err
+		}
+		defer resp.Body.Close()
+
+		if _, err := io.Copy(file, resp.Body); err != nil {
+			return "", err
+		}
+
+		return file.Name(), nil
+	default:
 		return "", err
 	}
-	defer file.Close()
-
-	resp, err := http.Get(url)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	if _, err := io.Copy(file, resp.Body); err != nil {
-		return "", err
-	}
-
-	return path, nil
 }

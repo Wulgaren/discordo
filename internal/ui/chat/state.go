@@ -1,77 +1,27 @@
 package chat
 
 import (
-	"context"
 	"log/slog"
 	"slices"
 
-	"github.com/ayn2op/discordo/internal/http"
 	"github.com/ayn2op/discordo/internal/notifications"
 	"github.com/ayn2op/tview"
 	"github.com/diamondburned/arikawa/v3/discord"
 	"github.com/diamondburned/arikawa/v3/gateway"
-	"github.com/diamondburned/arikawa/v3/session"
-	"github.com/diamondburned/arikawa/v3/state"
-	"github.com/diamondburned/arikawa/v3/state/store/defaultstore"
-	"github.com/diamondburned/arikawa/v3/utils/handler"
-	"github.com/diamondburned/arikawa/v3/utils/httputil"
 	"github.com/diamondburned/arikawa/v3/utils/httputil/httpdriver"
 	"github.com/diamondburned/arikawa/v3/utils/ws"
 	"github.com/diamondburned/ningen/v3"
+	"github.com/diamondburned/ningen/v3/states/read"
 )
 
-func (v *View) OpenState(token string) error {
-	identifyProps := http.IdentifyProperties()
-	gateway.DefaultIdentity = identifyProps
-	gateway.DefaultPresence = &gateway.UpdatePresenceCommand{
-		Status: v.cfg.Status,
-	}
-
-	id := gateway.DefaultIdentifier(token)
-	id.Compress = false
-
-	session := session.NewCustom(id, http.NewClient(token), handler.New())
-	state := state.NewFromSession(session, defaultstore.New())
-	v.state = ningen.FromState(state)
-
-	// Handlers
-	v.state.AddHandler(v.onRaw)
-	v.state.AddHandler(v.onReady)
-	v.state.AddHandler(v.onMessageCreate)
-	v.state.AddHandler(v.onMessageUpdate)
-	v.state.AddHandler(v.onMessageDelete)
-	v.state.AddHandler(v.onReadUpdate)
-	v.state.AddHandler(v.onGuildMembersChunk)
-	v.state.AddHandler(v.onGuildMemberRemove)
-
-	if v.cfg.TypingIndicator.Receive {
-		v.state.AddHandler(v.onTypingStart)
-	}
-
-	v.state.StateLog = func(err error) {
-		slog.Error("state log", "err", err)
-	}
-
-	v.state.OnRequest = append(v.state.OnRequest, httputil.WithHeaders(http.Headers()), v.onRequest)
-	return v.state.Open(context.TODO())
-}
-
-func (v *View) CloseState() error {
-	if v.state == nil {
-		return nil
-	}
-	return v.state.Close()
-}
-
-func (v *View) onRequest(r httpdriver.Request) error {
+func (m *Model) onRequest(r httpdriver.Request) error {
 	if req, ok := r.(*httpdriver.DefaultRequest); ok {
 		slog.Debug("new HTTP request", "method", req.Method, "url", req.URL)
 	}
-
 	return nil
 }
 
-func (v *View) onRaw(event *ws.RawEvent) {
+func (m *Model) onRaw(event *ws.RawEvent) {
 	slog.Debug(
 		"new raw event",
 		"code", event.OriginalCode,
@@ -80,49 +30,77 @@ func (v *View) onRaw(event *ws.RawEvent) {
 	)
 }
 
-func (v *View) onReady(r *gateway.ReadyEvent) {
-	dmNode := tview.NewTreeNode("Direct Messages")
-	root := v.guildsTree.
+func (m *Model) onReady(event *gateway.ReadyEvent) tview.Cmd {
+	// Rebuild indexes from scratch so reconnects and account switches do not
+	// retain pointers to detached tree nodes.
+	m.guildsTree.resetNodeIndex()
+
+	dmNode := tview.NewTreeNode("Direct Messages").SetReference(dmNode{}).SetExpandable(true).SetExpanded(false)
+	m.guildsTree.dmRootNode = dmNode
+
+	root := m.guildsTree.
 		GetRoot().
 		ClearChildren().
 		AddChild(dmNode)
 
-	for _, folder := range r.UserSettings.GuildFolders {
-		if folder.ID == 0 && len(folder.GuildIDs) == 1 {
-			guild, err := v.state.Cabinet.Guild(folder.GuildIDs[0])
-			if err != nil {
-				slog.Error(
-					"failed to get guild from state",
-					"guild_id",
-					folder.GuildIDs[0],
-					"err",
-					err,
-				)
-				continue
-			}
-
-			v.guildsTree.createGuildNode(root, *guild)
-		} else {
-			v.guildsTree.createFolderNode(folder)
+	// Track guilds already in folders to find orphans.
+	// Newly joined guilds may not be synced to GuildFolders yet but always appear in guild positions.
+	guildsInFolders := make(map[discord.GuildID]bool)
+	for _, folder := range event.UserSettings.GuildFolders {
+		for _, guildID := range folder.GuildIDs {
+			guildsInFolders[guildID] = true
 		}
 	}
 
-	v.guildsTree.SetCurrentNode(root)
-	// Only focus guilds tree if it's visible
-	if !v.cfg.HideGuildsTreeOnStartup {
-		v.app.SetFocus(v.guildsTree)
-	} else {
-		// Focus messages list if guilds tree is hidden
-		v.app.SetFocus(v.messagesList)
+	// Build index of all available guilds.
+	guildsByID := make(map[discord.GuildID]*gateway.GuildCreateEvent, len(event.Guilds))
+	for index := range event.Guilds {
+		guildsByID[event.Guilds[index].ID] = &event.Guilds[index]
 	}
-	v.app.Draw()
+
+	// Use GuildPositions for ordering (it's the canonical order).
+	// Guilds not in any folder are "orphans" - add them directly to root.
+	positions := event.UserSettings.GuildPositions
+	// Fallback: GuildPositions shouldn't be nil but handle gracefully
+	if len(positions) == 0 {
+		positions = make([]discord.GuildID, 0, len(event.Guilds))
+		for _, guildEvent := range event.Guilds {
+			positions = append(positions, guildEvent.ID)
+		}
+	}
+
+	for _, guildID := range positions {
+		// Already handled in folder processing below
+		if guildsInFolders[guildID] {
+			continue
+		}
+
+		// Orphan guild - add directly to root in order
+		if guildEvent, ok := guildsByID[guildID]; ok {
+			m.guildsTree.createGuildNode(root, guildEvent.Guild)
+		}
+	}
+
+	// Process folders (real folders and single-guild "folders")
+	for _, folder := range event.UserSettings.GuildFolders {
+		if folder.ID == 0 && len(folder.GuildIDs) == 1 {
+			if guild, ok := guildsByID[folder.GuildIDs[0]]; ok {
+				m.guildsTree.createGuildNode(root, guild.Guild)
+			}
+		} else {
+			m.guildsTree.createFolderNode(folder, guildsByID)
+		}
+	}
+
+	m.guildsTree.SetCurrentNode(root)
+	if !m.cfg.HideGuildsTreeOnStartup {
+		return tview.SetFocus(m.guildsTree)
+	}
+	return tview.SetFocus(m.messagesList)
 }
 
-func (v *View) onMessageCreate(message *gateway.MessageCreateEvent) {
-	selectedChannel := v.SelectedChannel()
-	
-	// Always mark as unread if message is not from ourselves
-	me, err := v.state.Cabinet.Me()
+func (m *Model) onMessageCreate(message *gateway.MessageCreateEvent) tview.Cmd {
+	me, err := m.state.Cabinet.Me()
 	if err == nil && message.Author.ID != me.ID {
 		var mentions int
 		for _, u := range message.Mentions {
@@ -130,58 +108,63 @@ func (v *View) onMessageCreate(message *gateway.MessageCreateEvent) {
 				mentions++
 			}
 		}
-		v.state.ReadState.MarkUnread(message.ChannelID, message.ID, mentions)
+		m.state.ReadState.MarkUnread(message.ChannelID, message.ID, mentions)
 	}
-	
-	// Send notification regardless of whether channel is selected
-	// The Notify function has its own logic to determine if notification should be sent
-	if err := notifications.Notify(v.state, message, v.cfg); err != nil {
-		slog.Error("failed to notify", "err", err, "channel_id", message.ChannelID, "message_id", message.ID)
-	}
-	
+
+	selectedChannel := m.SelectedChannel()
 	if selectedChannel != nil && selectedChannel.ID == message.ChannelID {
-		v.removeTyper(message.Author.ID)
-		v.app.QueueUpdateDraw(func() {
-			v.messagesList.addMessage(message.Message)
-		})
-		v.app.QueueUpdateDraw(func() {
-			v.refreshChannelNodeStyle(message.ChannelID)
-		})
-	} else {
-		v.app.QueueUpdateDraw(func() {
-			v.refreshChannelNodeStyle(message.ChannelID)
-		})
+		m.removeTyper(message.Author.ID)
+		m.messagesList.addMessage(message.Message)
+	}
+
+	m.refreshChannelNodeStyle(message.ChannelID)
+	return m.notify(*message)
+}
+
+func (m *Model) notify(message gateway.MessageCreateEvent) tview.Cmd {
+	return func() tview.Msg {
+		if err := notifications.Notify(m.state, message, m.cfg); err != nil {
+			slog.Error("failed to notify", "err", err, "channel_id", message.ChannelID, "message_id", message.ID)
+			return nil
+		}
+		return nil
 	}
 }
 
-func (v *View) onMessageUpdate(message *gateway.MessageUpdateEvent) {
-	if selected := v.SelectedChannel(); selected != nil && selected.ID == message.ChannelID {
-		index := slices.IndexFunc(v.messagesList.messages, func(m discord.Message) bool {
+func (m *Model) onMessageUpdate(message *gateway.MessageUpdateEvent) {
+	selectedChannel := m.SelectedChannel()
+	if selectedChannel == nil {
+		return
+	}
+
+	if selectedChannel.ID == message.ChannelID {
+		index := slices.IndexFunc(m.messagesList.messages, func(m discord.Message) bool {
 			return m.ID == message.ID
 		})
 		if index < 0 {
 			return
 		}
 
-		v.app.QueueUpdateDraw(func() {
-			v.messagesList.setMessage(index, message.Message)
-		})
+		m.messagesList.setMessage(index, message.Message)
 	}
 }
 
-func (v *View) onMessageDelete(message *gateway.MessageDeleteEvent) {
-	if selected := v.SelectedChannel(); selected != nil && selected.ID == message.ChannelID {
-		prevCursor := v.messagesList.Cursor()
-		deletedIndex := slices.IndexFunc(v.messagesList.messages, func(m discord.Message) bool {
+func (m *Model) onMessageDelete(message *gateway.MessageDeleteEvent) {
+	selectedChannel := m.SelectedChannel()
+	if selectedChannel == nil {
+		return
+	}
+
+	if selectedChannel.ID == message.ChannelID {
+		prevCursor := m.messagesList.Cursor()
+		deletedIndex := slices.IndexFunc(m.messagesList.messages, func(m discord.Message) bool {
 			return m.ID == message.ID
 		})
 		if deletedIndex < 0 {
 			return
 		}
 
-		v.app.QueueUpdateDraw(func() {
-			v.messagesList.deleteMessage(deletedIndex)
-		})
+		m.messagesList.deleteMessage(deletedIndex)
 
 		// Keep cursor stable when possible after removal.
 		newCursor := prevCursor
@@ -189,7 +172,7 @@ func (v *View) onMessageDelete(message *gateway.MessageDeleteEvent) {
 			// Prefer previous item; fall forward if we deleted the first.
 			newCursor = deletedIndex - 1
 			if newCursor < 0 {
-				if deletedIndex < len(v.messagesList.messages) {
+				if deletedIndex < len(m.messagesList.messages) {
 					newCursor = deletedIndex
 				} else {
 					newCursor = -1
@@ -201,23 +184,21 @@ func (v *View) onMessageDelete(message *gateway.MessageDeleteEvent) {
 		}
 		if newCursor != prevCursor {
 			// Avoid redundant cursor updates if nothing changed.
-			v.app.QueueUpdateDraw(func() {
-				v.messagesList.SetCursor(newCursor)
-			})
+			m.messagesList.SetCursor(newCursor)
 		}
 	}
 }
 
-func (v *View) onGuildMembersChunk(event *gateway.GuildMembersChunkEvent) {
-	v.messagesList.setFetchingChunk(false, uint(len(event.Members)))
+func (m *Model) onGuildMembersChunk(event *gateway.GuildMembersChunkEvent) {
+	m.messagesList.setFetchingChunk(false, uint(len(event.Members)))
 }
 
-func (v *View) onGuildMemberRemove(event *gateway.GuildMemberRemoveEvent) {
-	v.messageInput.cache.Invalidate(event.GuildID.String()+" "+event.User.Username, v.state.MemberState.SearchLimit)
+func (m *Model) onGuildMemberRemove(event *gateway.GuildMemberRemoveEvent) {
+	m.messageInput.cache.Invalidate(event.GuildID.String()+" "+event.User.Username, m.state.MemberState.SearchLimit)
 }
 
-func (v *View) onTypingStart(event *gateway.TypingStartEvent) {
-	selectedChannel := v.SelectedChannel()
+func (m *Model) onTypingStart(event *gateway.TypingStartEvent) {
+	selectedChannel := m.SelectedChannel()
 	if selectedChannel == nil {
 		return
 	}
@@ -226,15 +207,32 @@ func (v *View) onTypingStart(event *gateway.TypingStartEvent) {
 		return
 	}
 
-	me, err := v.state.Cabinet.Me()
-	if err != nil {
-		slog.Error("failed to get me from state", "err", err)
-		return
-	}
-
+	me, _ := m.state.Cabinet.Me()
 	if event.UserID == me.ID {
 		return
 	}
 
-	v.addTyper(event.UserID)
+	m.addTyper(event.UserID)
+}
+
+func (m *Model) onReadUpdate(event *read.UpdateEvent) {
+	// Use indexed node lookup to avoid walking the whole tree on every read event.
+	// This runs frequently while reading/typing across channels.
+	if event.GuildID.IsValid() {
+		if guildNode := m.guildsTree.findNodeByReference(event.GuildID); guildNode != nil {
+			m.guildsTree.setNodeLineStyle(guildNode, m.guildsTree.guildNodeStyle(event.GuildID))
+		}
+	}
+
+	// Channel style is always updated for the target channel regardless of
+	// whether it's in a guild or DM.
+	if channelNode := m.guildsTree.findNodeByReference(event.ChannelID); channelNode != nil {
+		channel, err := m.state.Cabinet.Channel(event.ChannelID)
+		if err != nil {
+			indication := m.state.ChannelIsUnread(event.ChannelID, ningen.UnreadOpts{IncludeMutedCategories: true})
+			m.guildsTree.setNodeLineStyle(channelNode, m.guildsTree.unreadStyle(indication))
+			return
+		}
+		m.guildsTree.setNodeLineStyle(channelNode, m.guildsTree.channelNodeStyle(*channel))
+	}
 }

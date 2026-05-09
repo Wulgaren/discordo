@@ -5,26 +5,22 @@ import (
 	"fmt"
 	"log/slog"
 
-	"github.com/ayn2op/discordo/internal/app"
 	"github.com/ayn2op/discordo/internal/config"
 	"github.com/ayn2op/discordo/internal/logger"
+	"github.com/ayn2op/discordo/internal/ui/root"
+	"github.com/ayn2op/tview"
 	"github.com/diamondburned/arikawa/v3/utils/ws"
-)
-
-var (
-	configPath string
-	logPath    string
-	logLevel   string
+	"github.com/gdamore/tcell/v3"
 )
 
 func Run() error {
-	flag.StringVar(&configPath, "config-path", config.DefaultPath(), "path of the configuration file")
-	flag.StringVar(&logPath, "log-path", logger.DefaultPath(), "path of the log file")
-	flag.StringVar(&logLevel, "log-level", "info", "log level")
+	configPath := flag.String("config-path", config.DefaultPath(), "path of the configuration file")
+	logPath := flag.String("log-path", logger.DefaultPath(), "path of the log file")
+	logLevel := flag.String("log-level", "info", "log level")
 	flag.Parse()
 
 	var level slog.Level
-	switch logLevel {
+	switch *logLevel {
 	case "debug":
 		ws.EnableRawEvents = true
 		level = slog.LevelDebug
@@ -36,14 +32,33 @@ func Run() error {
 		level = slog.LevelError
 	}
 
-	if err := logger.Load(logPath, level); err != nil {
+	logFile, err := logger.Load(*logPath, level)
+	if err != nil {
 		return fmt.Errorf("failed to load logger: %w", err)
 	}
+	defer logFile.Close()
 
-	cfg, err := config.Load(configPath)
+	cfg, err := config.Load(*configPath)
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
 
-	return app.New(cfg).Run()
+	screen, err := tcell.NewScreen()
+	if err != nil {
+		return fmt.Errorf("failed to create screen: %w", err)
+	}
+
+	if err := screen.Init(); err != nil {
+		return fmt.Errorf("failed to init screen: %w", err)
+	}
+
+	if cfg.Mouse {
+		screen.EnableMouse()
+	}
+	screen.EnablePaste()
+
+	tview.Styles = tview.Theme{}
+	app := tview.NewApplication(tview.WithScreen(screen))
+	app.SetRoot(root.NewModel(cfg, app))
+	return app.Run()
 }

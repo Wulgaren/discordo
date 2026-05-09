@@ -4,6 +4,7 @@ import (
 	"errors"
 
 	"github.com/ayn2op/tview"
+	"github.com/ayn2op/tview/list"
 	"github.com/gdamore/tcell/v3"
 )
 
@@ -31,56 +32,80 @@ func (aw *AlignmentWrapper) UnmarshalTOML(v any) error {
 
 type StyleWrapper struct{ tcell.Style }
 
-func NewStyleWrapper(style tcell.Style) StyleWrapper {
-	return StyleWrapper{Style: style}
-}
-
 func (sw *StyleWrapper) UnmarshalTOML(v any) error {
 	m, ok := v.(map[string]any)
 	if !ok {
 		return errInvalidType
 	}
 
+	// Reset on new styles
+	sw.Style = tcell.StyleDefault
+
 	for key, val := range m {
 		switch key {
 		case "foreground":
-			s, ok := val.(string)
-			if !ok {
-				continue
+			if s, ok := val.(string); ok {
+				sw.Style = sw.Foreground(tcell.GetColor(s))
 			}
-
-			color := tcell.GetColor(s)
-			sw.Style = sw.Foreground(color)
 		case "background":
-			s, ok := val.(string)
-			if !ok {
-				continue
+			if s, ok := val.(string); ok {
+				sw.Style = sw.Background(tcell.GetColor(s))
 			}
-
-			color := tcell.GetColor(s)
-			sw.Style = sw.Background(color)
 		case "attributes":
-			var attrs tcell.AttrMask
 			switch val := val.(type) {
 			case string:
-				attrs |= stringToAttrMask(val)
+				sw.parseAttr(val)
 			case []any:
 				for _, attr := range val {
-					s, ok := attr.(string)
-					if !ok {
-						continue
+					if s, ok := attr.(string); ok {
+						sw.parseAttr(s)
 					}
-
-					attrs |= stringToAttrMask(s)
 				}
-
 			}
-
-			sw.Style = sw.Attributes(attrs)
+		case "underline":
+			if s, ok := val.(string); ok {
+				switch s {
+				case "":
+					sw.Style = sw.Underline(tcell.UnderlineStyleNone)
+				case "solid":
+					sw.Style = sw.Underline(tcell.UnderlineStyleSolid)
+				case "double":
+					sw.Style = sw.Underline(tcell.UnderlineStyleDouble)
+				case "curly":
+					sw.Style = sw.Underline(tcell.UnderlineStyleCurly)
+				case "dotted":
+					sw.Style = sw.Underline(tcell.UnderlineStyleDotted)
+				case "dashed":
+					sw.Style = sw.Underline(tcell.UnderlineStyleDashed)
+				}
+			}
+		case "underline_color":
+			if s, ok := val.(string); ok {
+				sw.Style = sw.Underline(tcell.GetColor(s))
+			}
 		}
 	}
 
 	return nil
+}
+
+func (sw *StyleWrapper) parseAttr(s string) {
+	switch s {
+	case "underline":
+		sw.Style = sw.Underline(true)
+	case "bold":
+		sw.Style = sw.Bold(true)
+	case "blink":
+		sw.Style = sw.Blink(true)
+	case "reverse":
+		sw.Style = sw.Reverse(true)
+	case "dim":
+		sw.Style = sw.Dim(true)
+	case "italic":
+		sw.Style = sw.Italic(true)
+	case "strikethrough":
+		sw.Style = sw.StrikeThrough(true)
+	}
 }
 
 type BorderSetWrapper struct{ tview.BorderSet }
@@ -107,7 +132,54 @@ func (bw *BorderSetWrapper) UnmarshalTOML(val any) error {
 	return nil
 }
 
+type GlyphSetWrapper struct{ tview.GlyphSet }
+
+func (gw *GlyphSetWrapper) UnmarshalTOML(val any) error {
+	s, ok := val.(string)
+	if !ok {
+		return errInvalidType
+	}
+
+	switch s {
+	case "minimal":
+		gw.GlyphSet = tview.MinimalGlyphSet()
+	case "box_drawing", "boxdrawing", "box":
+		gw.GlyphSet = tview.BoxDrawingGlyphSet()
+	case "unicode":
+		gw.GlyphSet = tview.UnicodeGlyphSet()
+	}
+
+	return nil
+}
+
+type ScrollBarVisibilityWrapper struct{ list.ScrollBarVisibility }
+
+func (vw *ScrollBarVisibilityWrapper) UnmarshalTOML(val any) error {
+	s, ok := val.(string)
+	if !ok {
+		return errInvalidType
+	}
+
+	switch s {
+	case "automatic", "auto":
+		vw.ScrollBarVisibility = list.ScrollBarVisibilityAutomatic
+	case "always":
+		vw.ScrollBarVisibility = list.ScrollBarVisibilityAlways
+	case "never", "hidden", "off":
+		vw.ScrollBarVisibility = list.ScrollBarVisibilityNever
+	}
+
+	return nil
+}
+
 type (
+	HelpTheme struct {
+		ShortKeyStyle  StyleWrapper `toml:"short_key_style"`
+		ShortDescStyle StyleWrapper `toml:"short_desc_style"`
+		FullKeyStyle   StyleWrapper `toml:"full_key_style"`
+		FullDescStyle  StyleWrapper `toml:"full_desc_style"`
+	}
+
 	ThemeStyle struct {
 		NormalStyle StyleWrapper `toml:"normal_style"`
 		ActiveStyle StyleWrapper `toml:"active_style"`
@@ -136,6 +208,11 @@ type (
 		AutoExpandFolders bool   `toml:"auto_expand_folders"`
 		Graphics          bool   `toml:"graphics"`
 		GraphicsColor     string `toml:"graphics_color"`
+
+		OnlineStyle  StyleWrapper `toml:"online_style"`
+		IdleStyle    StyleWrapper `toml:"idle_style"`
+		DNDStyle     StyleWrapper `toml:"dnd_style"`
+		OfflineStyle StyleWrapper `toml:"offline_style"`
 	}
 
 	MessagesListTheme struct {
@@ -149,6 +226,19 @@ type (
 
 		MessageStyle         StyleWrapper `toml:"message_style"`
 		SelectedMessageStyle StyleWrapper `toml:"selected_message_style"`
+
+		Embeds MessagesListEmbedsTheme `toml:"embeds"`
+	}
+
+	MessagesListEmbedsTheme struct {
+		ProviderStyle    StyleWrapper `toml:"provider_style"`
+		AuthorStyle      StyleWrapper `toml:"author_style"`
+		TitleStyle       StyleWrapper `toml:"title_style"`
+		DescriptionStyle StyleWrapper `toml:"description_style"`
+		FieldNameStyle   StyleWrapper `toml:"field_name_style"`
+		FieldValueStyle  StyleWrapper `toml:"field_value_style"`
+		FooterStyle      StyleWrapper `toml:"footer_style"`
+		URLStyle         StyleWrapper `toml:"url_style"`
 	}
 
 	MentionsListTheme struct {
@@ -156,31 +246,27 @@ type (
 		MaxHeight uint `toml:"max_height"`
 	}
 
+	DialogTheme struct {
+		Style           StyleWrapper `toml:"style"`
+		BackgroundStyle StyleWrapper `toml:"background_style"`
+	}
+
+	ScrollBarTheme struct {
+		Visibility ScrollBarVisibilityWrapper `toml:"visibility"`
+		GlyphSet   GlyphSetWrapper            `toml:"glyph_set"`
+		TrackStyle StyleWrapper               `toml:"track_style"`
+		ThumbStyle StyleWrapper               `toml:"thumb_style"`
+	}
+
 	Theme struct {
 		Title        TitleTheme        `toml:"title"`
 		Footer       FooterTheme       `toml:"footer"`
 		Border       BorderTheme       `toml:"border"`
 		GuildsTree   GuildsTreeTheme   `toml:"guilds_tree"`
+		ScrollBar    ScrollBarTheme    `toml:"scroll_bar"`
 		MessagesList MessagesListTheme `toml:"messages_list"`
 		MentionsList MentionsListTheme `toml:"mentions_list"`
+		Dialog       DialogTheme       `toml:"dialog"`
+		Help         HelpTheme         `toml:"help"`
 	}
 )
-
-func stringToAttrMask(s string) tcell.AttrMask {
-	switch s {
-	case "bold":
-		return tcell.AttrBold
-	case "blink":
-		return tcell.AttrBlink
-	case "reverse":
-		return tcell.AttrReverse
-	case "dim":
-		return tcell.AttrDim
-	case "italic":
-		return tcell.AttrItalic
-	case "strikethrough":
-		return tcell.AttrStrikeThrough
-	default:
-		return tcell.AttrNone
-	}
-}

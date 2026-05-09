@@ -1,64 +1,87 @@
 package chat
 
 import (
-	"cmp"
 	"fmt"
 	"log/slog"
-	"slices"
 
 	"github.com/ayn2op/discordo/internal/clipboard"
 	"github.com/ayn2op/discordo/internal/config"
 	"github.com/ayn2op/discordo/internal/ui"
 	"github.com/ayn2op/tview"
+	"github.com/ayn2op/tview/help"
+	"github.com/ayn2op/tview/keybind"
 	"github.com/diamondburned/arikawa/v3/discord"
 	"github.com/diamondburned/arikawa/v3/gateway"
 	"github.com/diamondburned/ningen/v3"
 	"github.com/gdamore/tcell/v3"
 )
 
+type dmNode struct{}
+
 type guildsTree struct {
 	*tview.TreeView
-	cfg      *config.Config
-	chatView *View
+	chat *Model
+
+	cfg *config.Config
+
+	// Fast-path indexes for frequent event handlers (read updates, picker
+	// navigation). They mirror the current rendered tree and are rebuilt on
+	// READY before nodes are added.
+	guildNodeByID   map[discord.GuildID]*tview.TreeNode
+	channelNodeByID map[discord.ChannelID]*tview.TreeNode
+	dmRootNode      *tview.TreeNode
 }
 
-func newGuildsTree(cfg *config.Config, chatView *View) *guildsTree {
+func newGuildsTree(cfg *config.Config, chat *Model) *guildsTree {
 	gt := &guildsTree{
 		TreeView: tview.NewTreeView(),
 		cfg:      cfg,
-		chatView: chatView,
+		chat:     chat,
+
+		guildNodeByID:   make(map[discord.GuildID]*tview.TreeNode),
+		channelNodeByID: make(map[discord.ChannelID]*tview.TreeNode),
 	}
 
 	gt.Box = ui.ConfigureBox(gt.Box, &cfg.Theme)
 	gt.
 		SetRoot(tview.NewTreeNode("")).
 		SetTopLevel(1).
+		SetMarkers(tview.TreeMarkers{
+			Expanded:  cfg.Sidebar.Markers.Expanded,
+			Collapsed: cfg.Sidebar.Markers.Collapsed,
+			Leaf:      cfg.Sidebar.Markers.Leaf,
+		}).
 		SetGraphics(cfg.Theme.GuildsTree.Graphics).
 		SetGraphicsColor(tcell.GetColor(cfg.Theme.GuildsTree.GraphicsColor)).
-		SetSelectedFunc(gt.onSelected).
-		SetTitle("Guilds").
-		SetInputCapture(gt.onInputCapture)
+		SetTitle("Guilds")
 
 	return gt
 }
 
-func (gt *guildsTree) createFolderNode(folder gateway.GuildFolder) {
+func (gt *guildsTree) resetNodeIndex() {
+	// Keep allocated map capacity; READY can rebuild often during reconnects.
+	clear(gt.guildNodeByID)
+	clear(gt.channelNodeByID)
+	gt.dmRootNode = nil
+}
+
+func (gt *guildsTree) createFolderNode(folder gateway.GuildFolder, guildsByID map[discord.GuildID]*gateway.GuildCreateEvent) {
 	name := "Folder"
 	if folder.Name != "" {
-		name = fmt.Sprintf("[%s]%s[-]", folder.Color, folder.Name)
+		name = folder.Name
 	}
 
 	folderNode := tview.NewTreeNode(name).SetExpanded(gt.cfg.Theme.GuildsTree.AutoExpandFolders)
+	if folder.Color != 0 {
+		folderStyle := tcell.StyleDefault.Foreground(tcell.NewHexColor(int32(folder.Color)))
+		gt.setNodeLineStyle(folderNode, folderStyle)
+	}
 	gt.GetRoot().AddChild(folderNode)
 
-	for _, gID := range folder.GuildIDs {
-		guild, err := gt.chatView.state.Cabinet.Guild(gID)
-		if err != nil {
-			slog.Error("failed to get guild from state", "guild_id", gID, "err", err)
-			continue
+	for _, guildID := range folder.GuildIDs {
+		if guildEvent, ok := guildsByID[guildID]; ok {
+			gt.createGuildNode(folderNode, guildEvent.Guild)
 		}
-
-		gt.createGuildNode(folderNode, *guild)
 	}
 }
 
@@ -77,65 +100,117 @@ func (gt *guildsTree) unreadStyle(indication ningen.UnreadIndication) tcell.Styl
 	return style
 }
 
-func (gt *guildsTree) getGuildNodeStyle(guildID discord.GuildID) tcell.Style {
-	indication := gt.chatView.state.GuildIsUnread(guildID, ningen.GuildUnreadOpts{UnreadOpts: ningen.UnreadOpts{IncludeMutedCategories: true}})
+func (gt *guildsTree) guildNodeStyle(guildID discord.GuildID) tcell.Style {
+	indication := gt.chat.state.GuildIsUnread(guildID, ningen.GuildUnreadOpts{UnreadOpts: ningen.UnreadOpts{IncludeMutedCategories: true}})
 	return gt.unreadStyle(indication)
 }
 
-func (gt *guildsTree) getChannelNodeStyle(channelID discord.ChannelID) tcell.Style {
-	indication := gt.chatView.state.ChannelIsUnread(channelID, ningen.UnreadOpts{IncludeMutedCategories: true})
-	return gt.unreadStyle(indication)
+func (gt *guildsTree) channelNodeStyle(channel discord.Channel) tcell.Style {
+	unread := gt.unreadStyle(gt.chat.state.ChannelIsUnread(channel.ID, ningen.UnreadOpts{IncludeMutedCategories: true}))
+	if channel.Type != discord.DirectMessage || len(channel.DMRecipients) != 1 {
+		return unread
+	}
+
+	recipient := channel.DMRecipients[0]
+	presence, err := gt.chat.state.Cabinet.Presence(discord.NullGuildID, recipient.ID)
+	if err != nil {
+		return ui.MergeStyle(gt.dmStatusStyle(discord.OfflineStatus), unread)
+	}
+
+	return ui.MergeStyle(gt.dmStatusStyle(presence.Status), unread)
+}
+
+func (gt *guildsTree) dmStatusStyle(status discord.Status) tcell.Style {
+	switch status {
+	case discord.DoNotDisturbStatus:
+		return gt.cfg.Theme.GuildsTree.DNDStyle.Style
+	case discord.IdleStatus:
+		return gt.cfg.Theme.GuildsTree.IdleStyle.Style
+	case discord.OnlineStatus:
+		return gt.cfg.Theme.GuildsTree.OnlineStyle.Style
+	default:
+		return gt.cfg.Theme.GuildsTree.OfflineStyle.Style
+	}
 }
 
 func (gt *guildsTree) createGuildNode(n *tview.TreeNode, guild discord.Guild) {
 	guildNode := tview.NewTreeNode(guild.Name).
 		SetReference(guild.ID).
-		SetTextStyle(gt.getGuildNodeStyle(guild.ID))
+		SetExpandable(true).
+		SetExpanded(false).
+		SetIndent(gt.cfg.Sidebar.Indents.Guild)
+	gt.setNodeLineStyle(guildNode, gt.guildNodeStyle(guild.ID))
 	n.AddChild(guildNode)
+	gt.guildNodeByID[guild.ID] = guildNode
 }
 
 func (gt *guildsTree) createChannelNode(node *tview.TreeNode, channel discord.Channel) {
-	if channel.Type != discord.DirectMessage && channel.Type != discord.GroupDM && !gt.chatView.state.HasPermissions(channel.ID, discord.PermissionViewChannel) {
+	if channel.Type != discord.DirectMessage && channel.Type != discord.GroupDM && channel.Type != discord.GuildCategory && !gt.chat.state.HasPermissions(channel.ID, discord.PermissionViewChannel) {
 		return
 	}
 
-	channelNode := tview.NewTreeNode(ui.ChannelToString(channel)).
-		SetReference(channel.ID).
-		SetTextStyle(gt.getChannelNodeStyle(channel.ID))
+	indents := gt.cfg.Sidebar.Indents
+	channelNode := tview.NewTreeNode(ui.ChannelToString(channel, gt.cfg.Icons, gt.chat.state)).SetReference(channel.ID)
+	gt.setNodeLineStyle(channelNode, gt.channelNodeStyle(channel))
+	switch channel.Type {
+	case discord.DirectMessage:
+		channelNode.SetIndent(indents.DM)
+	case discord.GroupDM:
+		channelNode.SetIndent(indents.GroupDM)
+	case discord.GuildCategory:
+		channelNode.SetIndent(indents.Category)
+		channelNode.SetExpandable(true).SetExpanded(true)
+	case discord.GuildForum:
+		channelNode.SetIndent(indents.Forum)
+		channelNode.SetExpandable(true).SetExpanded(false)
+	default:
+		channelNode.SetIndent(indents.Channel)
+	}
 	node.AddChild(channelNode)
+	gt.channelNodeByID[channel.ID] = channelNode
+}
+
+func (gt *guildsTree) setNodeLineStyle(node *tview.TreeNode, style tcell.Style) {
+	line := node.GetLine()
+	for i := range line {
+		line[i].Style = style
+	}
+	node.SetLine(line)
 }
 
 func (gt *guildsTree) createChannelNodes(node *tview.TreeNode, channels []discord.Channel) {
+	// Preserve exact ordering semantics:
+	// 1) top-level non-categories (in input order),
+	// 2) categories that have at least one child in the source slice (in input order),
+	// 3) parented channels under already-created categories (in input order).
+	//
+	// We precompute parent presence once to avoid the O(n^2) category-child scan.
+	hasChildByParentID := make(map[discord.ChannelID]struct{}, len(channels))
+	for _, channel := range channels {
+		if channel.ParentID.IsValid() {
+			hasChildByParentID[channel.ParentID] = struct{}{}
+		}
+	}
+
 	for _, channel := range channels {
 		if channel.Type != discord.GuildCategory && !channel.ParentID.IsValid() {
 			gt.createChannelNode(node, channel)
 		}
 	}
 
-PARENT_CHANNELS:
 	for _, channel := range channels {
 		if channel.Type == discord.GuildCategory {
-			for _, nested := range channels {
-				if nested.ParentID == channel.ID {
-					gt.createChannelNode(node, channel)
-					continue PARENT_CHANNELS
-				}
+			if _, ok := hasChildByParentID[channel.ID]; ok {
+				gt.createChannelNode(node, channel)
 			}
 		}
 	}
 
 	for _, channel := range channels {
 		if channel.ParentID.IsValid() {
-			var parent *tview.TreeNode
-			node.Walk(func(node, _ *tview.TreeNode) bool {
-				if node.GetReference() == channel.ParentID {
-					parent = node
-					return false
-				}
-
-				return true
-			})
-
+			// Parent categories are inserted earlier in this function, so this
+			// lookup is O(1) and avoids per-channel subtree walks.
+			parent := gt.channelNodeByID[channel.ParentID]
 			if parent != nil {
 				gt.createChannelNode(parent, channel)
 			}
@@ -143,41 +218,40 @@ PARENT_CHANNELS:
 	}
 }
 
-func (gt *guildsTree) onSelected(node *tview.TreeNode) {
+func (gt *guildsTree) onSelected(node *tview.TreeNode) tview.Cmd {
 	if len(node.GetChildren()) != 0 {
 		node.SetExpanded(!node.IsExpanded())
-		return
+		return nil
 	}
 
 	switch ref := node.GetReference().(type) {
 	case discord.GuildID:
-		go gt.chatView.state.MemberState.Subscribe(ref)
+		go gt.chat.state.MemberState.Subscribe(ref)
 
-		channels, err := gt.chatView.state.Cabinet.Channels(ref)
+		channels, err := gt.chat.state.Cabinet.Channels(ref)
 		if err != nil {
 			slog.Error("failed to get channels", "err", err, "guild_id", ref)
-			return
+			return nil
 		}
 
-		slices.SortFunc(channels, func(a, b discord.Channel) int {
-			return cmp.Compare(a.Position, b.Position)
-		})
-
+		ui.SortGuildChannels(channels)
 		gt.createChannelNodes(node, channels)
+		node.Expand()
+		return nil
 	case discord.ChannelID:
-		channel, err := gt.chatView.state.Cabinet.Channel(ref)
+		channel, err := gt.chat.state.Cabinet.Channel(ref)
 		if err != nil {
-			slog.Error("failed to get channel", "channel_id", ref)
-			return
+			slog.Error("failed to get channel from state", "err", err, "channel_id", ref)
+			return nil
 		}
 
 		// Handle forum channels differently - they contain threads, not direct messages
 		if channel.Type == discord.GuildForum {
 			// Get all channels from the guild - this includes active threads from GuildCreateEvent
-			allChannels, err := gt.chatView.state.Cabinet.Channels(channel.GuildID)
+			allChannels, err := gt.chat.state.Cabinet.Channels(channel.GuildID)
 			if err != nil {
 				slog.Error("failed to get channels for forum threads", "err", err, "guild_id", channel.GuildID)
-				return
+				return nil
 			}
 
 			// Filter for threads that belong to this forum channel
@@ -194,72 +268,47 @@ func (gt *guildsTree) onSelected(node *tview.TreeNode) {
 			for _, thread := range forumThreads {
 				gt.createChannelNode(node, thread)
 			}
-
-			// Expand the node to show threads
-			node.SetExpanded(true)
-			return
+			node.Expand()
+			return nil
 		}
 
-		messages, err := gt.chatView.state.Messages(channel.ID, uint(gt.cfg.MessagesLimit))
+		return gt.loadChannel(*channel)
+	case dmNode: // Direct messages folder
+		channels, err := gt.chat.state.PrivateChannels()
 		if err != nil {
-			slog.Error("failed to get messages", "err", err, "channel_id", channel.ID, "limit", gt.cfg.MessagesLimit)
-			return
+			slog.Error("failed to get private channels", "err", err)
+			return nil
 		}
 
-		// Mark as read using the actual last message ID from loaded messages
-		// If messages are loaded, use the first (most recent) message ID, otherwise use channel's LastMessageID
+		ui.SortPrivateChannels(channels)
+		for _, c := range channels {
+			gt.createChannelNode(node, c)
+		}
+		node.Expand()
+		return nil
+	}
+	return nil
+}
+
+func (gt *guildsTree) loadChannel(channel discord.Channel) tview.Cmd {
+	limit := uint(gt.cfg.MessagesLimit)
+	return func() tview.Msg {
+		messages, err := gt.chat.state.Messages(channel.ID, limit)
+		if err != nil {
+			slog.Error("failed to get messages", "err", err, "channel_id", channel.ID, "limit", limit)
+			return nil
+		}
+
 		lastMessageID := channel.LastMessageID
 		if len(messages) > 0 {
 			lastMessageID = messages[0].ID
 		}
-		go gt.chatView.state.ReadState.MarkRead(channel.ID, lastMessageID)
+		go gt.chat.state.ReadState.MarkRead(channel.ID, lastMessageID)
 
 		if guildID := channel.GuildID; guildID.IsValid() {
-			gt.chatView.messagesList.requestGuildMembers(guildID, messages)
+			gt.chat.messagesList.requestGuildMembers(guildID, messages)
 		}
-
-		gt.chatView.SetSelectedChannel(channel)
-		gt.chatView.clearTypers()
-		gt.chatView.messageInput.stopTypingTimer()
-
-		gt.chatView.messagesList.reset()
-		gt.chatView.messagesList.setTitle(*channel)
-		gt.chatView.messagesList.drawMessages(messages)
-		gt.chatView.messagesList.ScrollToEnd()
-
-		hasNoPerm := channel.Type != discord.DirectMessage && channel.Type != discord.GroupDM && !gt.chatView.state.HasPermissions(channel.ID, discord.PermissionSendMessages)
-		gt.chatView.messageInput.SetDisabled(hasNoPerm)
-		if hasNoPerm {
-			gt.chatView.messageInput.SetPlaceholder("You do not have permission to send messages in this channel.")
-		} else {
-			gt.chatView.messageInput.SetPlaceholder("Message...")
-			if gt.cfg.AutoFocus {
-				gt.chatView.app.SetFocus(gt.chatView.messageInput)
-			}
-		}
-
-	case nil: // Direct messages folder
-		channels, err := gt.chatView.state.PrivateChannels()
-		if err != nil {
-			slog.Error("failed to get private channels", "err", err)
-			return
-		}
-
-		msgID := func(ch discord.Channel) discord.MessageID {
-			if ch.LastMessageID.IsValid() {
-				return ch.LastMessageID
-			}
-			return discord.MessageID(ch.ID)
-		}
-
-		slices.SortFunc(channels, func(a, b discord.Channel) int {
-			// Descending order
-			return cmp.Compare(msgID(b), msgID(a))
-		})
-
-		for _, c := range channels {
-			gt.createChannelNode(node, c)
-		}
+		return channelLoadedMsg{Channel: channel, Messages: messages}
 	}
 }
 
@@ -277,155 +326,211 @@ func (gt *guildsTree) collapseParentNode(node *tview.TreeNode) {
 		})
 }
 
-func (gt *guildsTree) onInputCapture(event *tcell.EventKey) *tcell.EventKey {
-	switch event.Name() {
-	case gt.cfg.Keys.GuildsTree.CollapseParentNode:
-		gt.collapseParentNode(gt.GetCurrentNode())
+func (gt *guildsTree) Update(msg tview.Msg) tview.Cmd {
+	switch msg := msg.(type) {
+	case tview.TreeViewSelectedMsg:
+		return gt.onSelected(msg.Node)
+	case tview.KeyMsg:
+		handler := gt.TreeView.Update
+		switch {
+		case keybind.Matches(msg, gt.cfg.Keybinds.GuildsTree.CollapseAll.Keybind):
+			for _, node := range gt.GetRoot().GetChildren() {
+				node.CollapseAll()
+			}
+			return nil
+		case keybind.Matches(msg, gt.cfg.Keybinds.GuildsTree.CollapseParentNode.Keybind):
+			gt.collapseParentNode(gt.GetCurrentNode())
+			return nil
+		case keybind.Matches(msg, gt.cfg.Keybinds.GuildsTree.MoveToParentNode.Keybind):
+			return handler(tcell.NewEventKey(tcell.KeyRune, "K", tcell.ModNone))
+		case keybind.Matches(msg, gt.cfg.Keybinds.GuildsTree.Up.Keybind):
+			return handler(tcell.NewEventKey(tcell.KeyUp, "", tcell.ModNone))
+		case keybind.Matches(msg, gt.cfg.Keybinds.GuildsTree.Down.Keybind):
+			return handler(tcell.NewEventKey(tcell.KeyDown, "", tcell.ModNone))
+		case keybind.Matches(msg, gt.cfg.Keybinds.GuildsTree.Top.Keybind):
+			gt.Move(gt.GetRowCount() * -1)
+			return nil
+		case keybind.Matches(msg, gt.cfg.Keybinds.GuildsTree.Bottom.Keybind):
+			gt.Move(gt.GetRowCount())
+			return nil
+		case keybind.Matches(msg, gt.cfg.Keybinds.GuildsTree.SelectCurrent.Keybind):
+			return handler(tcell.NewEventKey(tcell.KeyEnter, "", tcell.ModNone))
+		case keybind.Matches(msg, gt.cfg.Keybinds.GuildsTree.YankID.Keybind):
+			return gt.yankID()
+		}
+		// Do not fall through to TreeView defaults for unmatched keys.
 		return nil
-	case gt.cfg.Keys.GuildsTree.MoveToParentNode:
-		return tcell.NewEventKey(tcell.KeyRune, "K", tcell.ModNone)
-
-	case gt.cfg.Keys.GuildsTree.SelectPrevious:
-		return tcell.NewEventKey(tcell.KeyUp, "", tcell.ModNone)
-	case gt.cfg.Keys.GuildsTree.SelectNext:
-		return tcell.NewEventKey(tcell.KeyDown, "", tcell.ModNone)
-	case gt.cfg.Keys.GuildsTree.SelectFirst:
-		gt.Move(gt.GetRowCount() * -1)
-		// return tcell.NewEventKey(tcell.KeyHome, 0, tcell.ModNone)
-	case gt.cfg.Keys.GuildsTree.SelectLast:
-		gt.Move(gt.GetRowCount())
-		// return tcell.NewEventKey(tcell.KeyEnd, 0, tcell.ModNone)
-
-	case gt.cfg.Keys.GuildsTree.SelectCurrent:
-		return tcell.NewEventKey(tcell.KeyEnter, "", tcell.ModNone)
-
-	case gt.cfg.Keys.GuildsTree.YankID:
-		gt.yankID()
 	}
-
-	// Support arrow keys directly as an alternative to configured keys
-	switch event.Key() {
-	case tcell.KeyUp:
-		return tcell.NewEventKey(tcell.KeyUp, "", tcell.ModNone)
-	case tcell.KeyDown:
-		return tcell.NewEventKey(tcell.KeyDown, "", tcell.ModNone)
-	case tcell.KeyLeft:
-		// Left arrow collapses parent node (similar to collapse_parent_node)
-		gt.collapseParentNode(gt.GetCurrentNode())
-		return nil
-	case tcell.KeyRight:
-		// Right arrow expands/selects current node (similar to select_current)
-		return tcell.NewEventKey(tcell.KeyEnter, "", tcell.ModNone)
-	}
-
-	return nil
+	return gt.TreeView.Update(msg)
 }
 
-func (gt *guildsTree) yankID() {
+func (gt *guildsTree) yankID() tview.Cmd {
 	node := gt.GetCurrentNode()
 	if node == nil {
-		return
+		return nil
 	}
 
 	// Reference of a tree node in the guilds tree is its ID.
 	// discord.Snowflake (discord.GuildID and discord.ChannelID) have the String method.
 	if id, ok := node.GetReference().(fmt.Stringer); ok {
-		go clipboard.Write(clipboard.FmtText, []byte(id.String()))
+		return func() tview.Msg {
+			if err := clipboard.Write(clipboard.FmtText, []byte(id.String())); err != nil {
+				slog.Error("failed to copy node id", "err", err)
+			}
+			return nil
+		}
+	}
+	return nil
+}
+
+func (gt *guildsTree) findNodeByReference(reference any) *tview.TreeNode {
+	switch ref := reference.(type) {
+	case discord.GuildID:
+		return gt.guildNodeByID[ref]
+	case discord.ChannelID:
+		return gt.channelNodeByID[ref]
+	case dmNode:
+		return gt.dmRootNode
+	default:
+		// Fallback keeps this helper safe for non-indexed custom references.
+		var found *tview.TreeNode
+		gt.GetRoot().Walk(func(node, _ *tview.TreeNode) bool {
+			if node.GetReference() == reference {
+				found = node
+				return false
+			}
+			return true
+		})
+		return found
 	}
 }
 
-func (gt *guildsTree) SelectChannelID(channelID discord.ChannelID) {
-	if gt.chatView.state == nil || gt.chatView.state.Cabinet == nil {
-		return
-	}
-
-	// First, check if the channel node exists
-	var channelNode *tview.TreeNode
-	gt.GetRoot().Walk(func(node, _ *tview.TreeNode) bool {
-		if node.GetReference() == channelID {
-			channelNode = node
-			return false
-		}
-		return true
-	})
-
-	if channelNode != nil {
-		gt.SetCurrentNode(channelNode)
-		gt.onSelected(channelNode)
-		return
-	}
-
-	// If not found, it might be because the guild hasn't been expanded yet.
-	// Find the channel from state to get the GuildID.
-	channel, err := gt.chatView.state.Cabinet.Channel(channelID)
+func (gt *guildsTree) findNodeByChannelID(channelID discord.ChannelID) *tview.TreeNode {
+	channel, err := gt.chat.state.Cabinet.Channel(channelID)
 	if err != nil {
-		slog.Error("failed to get channel", "err", err, "channel_id", channelID)
+		slog.Error("failed to get channel", "channel_id", channelID, "err", err)
+		return nil
+	}
+
+	var reference any
+	if guildID := channel.GuildID; guildID.IsValid() {
+		reference = guildID
+	} else {
+		reference = dmNode{}
+	}
+	if parentNode := gt.findNodeByReference(reference); parentNode != nil {
+		if len(parentNode.GetChildren()) == 0 {
+			gt.onSelected(parentNode)
+		}
+	}
+
+	node := gt.findNodeByReference(channelID)
+	return node
+}
+
+func (gt *guildsTree) expandPathToNode(node *tview.TreeNode) {
+	if node == nil {
 		return
 	}
-
-	if !channel.GuildID.IsValid() {
-		// DM or GroupDM. These should be under "Direct Messages" node.
-		var dmNode *tview.TreeNode
-		gt.GetRoot().Walk(func(node, _ *tview.TreeNode) bool {
-			// DM node usually has no reference (nil) and specific text, or we can tag it better.
-			// In onReady, it's created as tview.NewTreeNode("Direct Messages").
-			if node.GetReference() == nil && node.GetText() == "Direct Messages" {
-				dmNode = node
-				return false
-			}
-			return true
-		})
-
-		if dmNode != nil {
-			// Expand/Select DM node to populate
-			gt.onSelected(dmNode)
-			dmNode.SetExpanded(true)
-
-			// Now try to find channel again
-			gt.GetRoot().Walk(func(node, _ *tview.TreeNode) bool {
-				if node.GetReference() == channelID {
-					channelNode = node
-					return false
-				}
-				return true
-			})
-			if channelNode != nil {
-				gt.SetCurrentNode(channelNode)
-				gt.onSelected(channelNode)
-			}
-		}
-		return
+	for _, n := range gt.GetPath(node) {
+		n.Expand()
 	}
+}
 
-	// It's a guild channel. Find the guild node.
-	var guildNode *tview.TreeNode
-	gt.GetRoot().Walk(func(node, _ *tview.TreeNode) bool {
-		if node.GetReference() == channel.GuildID {
-			guildNode = node
-			return false
-		}
-		return true
-	})
+var _ help.KeyMap = (*guildsTree)(nil)
 
-	if guildNode != nil {
-		// Expand guild to populate channels
-		if len(guildNode.GetChildren()) == 0 {
-			gt.onSelected(guildNode)
-		}
-		guildNode.SetExpanded(true)
-
-		// Now find channel node
-		gt.GetRoot().Walk(func(node, _ *tview.TreeNode) bool {
-			if node.GetReference() == channelID {
-				channelNode = node
-				return false
+func (gt *guildsTree) ShortHelp() []keybind.Keybind {
+	cfg := gt.cfg.Keybinds.GuildsTree
+	selectCurrent := cfg.SelectCurrent.Keybind
+	selectHelp := selectCurrent.Help()
+	selectDesc := selectHelp.Desc
+	if node := gt.GetCurrentNode(); node != nil {
+		if len(node.GetChildren()) > 0 {
+			if node.IsExpanded() {
+				selectDesc = "collapse"
+			} else {
+				selectDesc = "expand"
 			}
-			return true
-		})
-
-		if channelNode != nil {
-			gt.SetCurrentNode(channelNode)
-			gt.onSelected(channelNode)
+		} else {
+			switch node.GetReference().(type) {
+			case discord.GuildID, dmNode:
+				selectDesc = "expand"
+			}
 		}
 	}
+	selectCurrent.SetHelp(selectHelp.Key, selectDesc)
+
+	shortHelp := []keybind.Keybind{cfg.Up.Keybind, cfg.Down.Keybind, selectCurrent}
+	if gt.canCollapseParent(gt.GetCurrentNode()) {
+		shortHelp = append(shortHelp, cfg.CollapseParentNode.Keybind)
+	}
+	return shortHelp
+}
+
+func (gt *guildsTree) FullHelp() [][]keybind.Keybind {
+	cfg := gt.cfg.Keybinds.GuildsTree
+	selectCurrent := cfg.SelectCurrent.Keybind
+	selectHelp := selectCurrent.Help()
+	selectDesc := selectHelp.Desc
+	if node := gt.GetCurrentNode(); node != nil {
+		if len(node.GetChildren()) > 0 {
+			if node.IsExpanded() {
+				selectDesc = "collapse"
+			} else {
+				selectDesc = "expand"
+			}
+		} else {
+			switch node.GetReference().(type) {
+			case discord.GuildID, dmNode:
+				selectDesc = "expand"
+			}
+		}
+	}
+	selectCurrent.SetHelp(selectHelp.Key, selectDesc)
+
+	selectGroup := []keybind.Keybind{selectCurrent, cfg.MoveToParentNode.Keybind}
+	selectGroup = append(selectGroup, gt.collapseKeybinds()...)
+
+	return [][]keybind.Keybind{
+		{cfg.Up.Keybind, cfg.Down.Keybind, cfg.Top.Keybind, cfg.Bottom.Keybind},
+		selectGroup,
+		{cfg.YankID.Keybind},
+	}
+}
+
+func (gt *guildsTree) collapseKeybinds() []keybind.Keybind {
+	cfg := gt.cfg.Keybinds.GuildsTree
+
+	var keybinds []keybind.Keybind
+	if gt.canCollapseParent(gt.GetCurrentNode()) {
+		keybinds = append(keybinds, cfg.CollapseParentNode.Keybind)
+	}
+	if gt.canCollapseAll() {
+		keybinds = append(keybinds, cfg.CollapseAll.Keybind)
+	}
+	return keybinds
+}
+
+func (gt *guildsTree) canCollapseParent(node *tview.TreeNode) bool {
+	if node == nil {
+		return false
+	}
+	path := gt.GetPath(node)
+	// Path layout is [root, ..., node]. A non-root parent means at least 3 nodes.
+	if len(path) < 3 {
+		return false
+	}
+	parent := path[len(path)-2]
+	return parent != nil && parent.GetLevel() != 0
+}
+
+func (gt *guildsTree) canCollapseAll() bool {
+	var can bool
+	for _, node := range gt.GetRoot().GetChildren() {
+		if node.IsExpanded() {
+			can = true
+			break
+		}
+	}
+	return can
 }
