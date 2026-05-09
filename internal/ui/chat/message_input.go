@@ -101,6 +101,15 @@ func (mi *messageInput) stopTypingTimer() {
 }
 
 func (mi *messageInput) onInputCapture(event *tcell.EventKey) *tcell.EventKey {
+	// Discord-like: ↑ with empty draft loads newest own message for edit.
+	if event.Key() == tcell.KeyUp && !mi.chatView.GetVisibile(mentionsListPageName) {
+		if strings.TrimSpace(mi.GetText()) == "" && len(mi.sendMessageData.Files) == 0 {
+			if mi.chatView.messagesList.editLastOwnMessage() {
+				return nil
+			}
+		}
+	}
+
 	switch event.Name() {
 	case mi.cfg.Keys.MessageInput.Paste:
 		mi.paste()

@@ -652,6 +652,26 @@ func (ml *messagesList) reply(mention bool) {
 	ml.chatView.app.SetFocus(ml.chatView.messageInput)
 }
 
+// editLastOwnMessage selects the newest loaded message authored by the current
+// user and opens it in the message input for editing. Returns false if none.
+func (ml *messagesList) editLastOwnMessage() bool {
+	me, err := ml.chatView.state.Cabinet.Me()
+	if err != nil {
+		slog.Error("failed to get client user (me)", "err", err)
+		return false
+	}
+	for i := len(ml.messages) - 1; i >= 0; i-- {
+		if ml.messages[i].Author.ID != me.ID {
+			continue
+		}
+		ml.chatView.messageInput.sendMessageData = &api.SendMessageData{}
+		ml.SetCursor(i)
+		ml.edit()
+		return true
+	}
+	return false
+}
+
 func (ml *messagesList) edit() {
 	message, err := ml.selectedMessage()
 	if err != nil {
