@@ -54,7 +54,14 @@ func (cp *channelsPicker) Update(msg tview.Msg) tview.Cmd {
 			selectCmd = cp.chat.guildsTree.onSelected(node)
 		}
 		cp.chat.closePicker()
-		return selectCmd
+		toInput := cp.chat.focusMessageInput()
+		if selectCmd != nil && toInput != nil {
+			return tview.Sequence(selectCmd, toInput)
+		}
+		if selectCmd != nil {
+			return selectCmd
+		}
+		return toInput
 	case picker.CancelMsg:
 		cp.chat.closePicker()
 		return nil

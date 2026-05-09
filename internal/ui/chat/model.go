@@ -131,7 +131,6 @@ func (m *Model) buildLayout() {
 		SetDirection(flex.DirectionRow).
 		AddItem(m.messagesList, 0, 1, false).
 		AddItem(m.messageInput, 3, 1, false)
-	// The guilds tree is always focused first at start-up.
 	m.mainFlex.
 		AddItem(m.guildsTree, 0, 1, true).
 		AddItem(m.rightFlex, 0, 4, false)
@@ -193,8 +192,60 @@ func (m *Model) focusGuildsTree() tview.Cmd {
 }
 
 func (m *Model) focusMessageInput() tview.Cmd {
-	if !m.messageInput.GetDisabled() {
-		return tview.SetFocus(m.messageInput)
+	return tview.SetFocus(m.messageInput)
+}
+
+// matchesFocusMessageInput: many terminals report Ctrl+I as plain Tab. Old UI fixed this in
+// Pages SetInputCapture (ebd226f). We only accept that Tab from guilds/messages list so Tab
+// in the input still runs tab-complete.
+func (m *Model) matchesFocusMessageInput(msg *tcell.EventKey) bool {
+	if keybind.Matches(msg, m.cfg.Keybinds.FocusMessageInput.Keybind) {
+		return true
+	}
+	wantTabAsShortcut := false
+	for _, k := range m.cfg.Keybinds.FocusMessageInput.Keys() {
+		if k == "ctrl+i" {
+			wantTabAsShortcut = true
+			break
+		}
+	}
+	if !wantTabAsShortcut || msg.Key() != tcell.KeyTab || msg.Modifiers() != 0 {
+		return false
+	}
+	switch m.app.Focused() {
+	case m.guildsTree, m.messagesList:
+		return true
+	default:
+		return false
+	}
+}
+
+// globalKeyCmd handles root-level shortcuts on chat.Model before Layers.Update runs.
+func (m *Model) globalKeyCmd(msg tview.Msg) tview.Cmd {
+	keyMsg, ok := msg.(tview.KeyMsg)
+	if !ok {
+		return nil
+	}
+	switch {
+	case keybind.Matches(keyMsg, m.cfg.Keybinds.FocusGuildsTree.Keybind):
+		m.messageInput.removeMentionsList()
+		return m.focusGuildsTree()
+	case keybind.Matches(keyMsg, m.cfg.Keybinds.FocusMessagesList.Keybind):
+		m.messageInput.removeMentionsList()
+		return m.focusMessagesList()
+	case m.matchesFocusMessageInput(keyMsg):
+		return m.focusMessageInput()
+	case keybind.Matches(keyMsg, m.cfg.Keybinds.FocusPrevious.Keybind):
+		return m.focusPrevious()
+	case keybind.Matches(keyMsg, m.cfg.Keybinds.FocusNext.Keybind):
+		return m.focusNext()
+	case keybind.Matches(keyMsg, m.cfg.Keybinds.ToggleGuildsTree.Keybind):
+		return m.toggleGuildsTree()
+	case keybind.Matches(keyMsg, m.cfg.Keybinds.ToggleChannelsPicker.Keybind):
+		m.togglePicker()
+		return nil
+	case keybind.Matches(keyMsg, m.cfg.Keybinds.Logout.Keybind):
+		return tview.Sequence(m.closeState(), m.logout())
 	}
 	return nil
 }
@@ -330,29 +381,8 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 			return focusCmd
 		}
 	case tview.KeyMsg:
-		switch {
-		case keybind.Matches(msg, m.cfg.Keybinds.FocusGuildsTree.Keybind):
-			m.messageInput.removeMentionsList()
-			return m.focusGuildsTree()
-		case keybind.Matches(msg, m.cfg.Keybinds.FocusMessagesList.Keybind):
-			m.messageInput.removeMentionsList()
-			return m.focusMessagesList()
-		case keybind.Matches(msg, m.cfg.Keybinds.FocusMessageInput.Keybind):
-			return m.focusMessageInput()
-
-		case keybind.Matches(msg, m.cfg.Keybinds.FocusPrevious.Keybind):
-			return m.focusPrevious()
-		case keybind.Matches(msg, m.cfg.Keybinds.FocusNext.Keybind):
-			return m.focusNext()
-
-		case keybind.Matches(msg, m.cfg.Keybinds.ToggleGuildsTree.Keybind):
-			return m.toggleGuildsTree()
-		case keybind.Matches(msg, m.cfg.Keybinds.ToggleChannelsPicker.Keybind):
-			m.togglePicker()
-			return nil
-
-		case keybind.Matches(msg, m.cfg.Keybinds.Logout.Keybind):
-			return tview.Sequence(m.closeState(), m.logout())
+		if cmd := m.globalKeyCmd(msg); cmd != nil {
+			return cmd
 		}
 	case tabSuggestMsg:
 		// Member search completes in a command goroutine; resume suggestion

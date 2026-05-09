@@ -93,10 +93,7 @@ func (m *Model) onReady(event *gateway.ReadyEvent) tview.Cmd {
 	}
 
 	m.guildsTree.SetCurrentNode(root)
-	if !m.cfg.HideGuildsTreeOnStartup {
-		return tview.SetFocus(m.guildsTree)
-	}
-	return tview.SetFocus(m.messagesList)
+	return tview.SetFocus(m.guildsTree)
 }
 
 func (m *Model) onMessageCreate(message *gateway.MessageCreateEvent) tview.Cmd {

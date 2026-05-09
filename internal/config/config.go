@@ -102,7 +102,6 @@ type (
 		Status              discord.Status `toml:"status"`
 		HideBlockedUsers    bool           `toml:"hide_blocked_users"`
 		ShowAttachmentLinks bool           `toml:"show_attachment_links"`
-		HideGuildsTreeOnStartup bool      `toml:"hide_guilds_tree_on_startup"`
 
 		// Use 0 to disable
 		AutocompleteLimit uint8 `toml:"autocomplete_limit"`
