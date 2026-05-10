@@ -100,13 +100,79 @@ func (gt *guildsTree) unreadStyle(indication ningen.UnreadIndication) tcell.Styl
 	return style
 }
 
+// unreadIndication compares read state to channel.LastMessageID (not LastMessage(), which can follow a stale cache).
+func (gt *guildsTree) unreadIndication(ch discord.Channel) ningen.UnreadIndication {
+	s := gt.chat.state
+	opts := ningen.UnreadOpts{IncludeMutedCategories: true}
+	rs := s.ReadState.ReadState(ch.ID)
+	if rs == nil {
+		// ReadState hides entries with no ack cursor yet; DMs often stay "invisible"
+		// until first read. If we have a last message, treat as unread.
+		if !ch.GuildID.IsValid() && ch.LastMessageID.IsValid() {
+			return ningen.ChannelUnread
+		}
+		return ningen.ChannelRead
+	}
+	if rs.MentionCount > 0 {
+		return ningen.ChannelMentioned
+	}
+	if s.ChannelIsMuted(ch.ID, opts) {
+		return ningen.ChannelRead
+	}
+	// state.Permissions errors for DMs/group DMs (no guild); ViewChannel applies only in guilds.
+	if ch.GuildID.IsValid() {
+		if !s.HasPermissions(ch.ID, discord.PermissionViewChannel) {
+			return ningen.ChannelRead
+		}
+	}
+	last := ch.LastMessageID
+	if !last.IsValid() {
+		return ningen.ChannelRead
+	}
+	if rs.LastMessageID < last {
+		return ningen.ChannelUnread
+	}
+	return ningen.ChannelRead
+}
+
+func (gt *guildsTree) guildUnreadIndication(guildID discord.GuildID) ningen.UnreadIndication {
+	s := gt.chat.state
+	opts := ningen.GuildUnreadOpts{UnreadOpts: ningen.UnreadOpts{IncludeMutedCategories: true}}
+	chs, err := s.Cabinet.Channels(guildID)
+	if err != nil {
+		return ningen.ChannelRead
+	}
+
+	var typeMap [128]bool
+	for _, typ := range opts.Types {
+		typeMap[typ] = true
+	}
+
+	ind := ningen.ChannelRead
+	for _, ch := range chs {
+		if opts.Types != nil && !typeMap[ch.Type] {
+			continue
+		}
+		if x := gt.unreadIndication(ch); x > ind {
+			ind = x
+		}
+	}
+
+	if s.MutedState.Guild(guildID, false) {
+		if ind != ningen.ChannelMentioned {
+			return ningen.ChannelRead
+		}
+	}
+
+	return ind
+}
+
 func (gt *guildsTree) guildNodeStyle(guildID discord.GuildID) tcell.Style {
-	indication := gt.chat.state.GuildIsUnread(guildID, ningen.GuildUnreadOpts{UnreadOpts: ningen.UnreadOpts{IncludeMutedCategories: true}})
-	return gt.unreadStyle(indication)
+	return gt.unreadStyle(gt.guildUnreadIndication(guildID))
 }
 
 func (gt *guildsTree) channelNodeStyle(channel discord.Channel) tcell.Style {
-	unread := gt.unreadStyle(gt.chat.state.ChannelIsUnread(channel.ID, ningen.UnreadOpts{IncludeMutedCategories: true}))
+	unread := gt.unreadStyle(gt.unreadIndication(channel))
 	if channel.Type != discord.DirectMessage || len(channel.DMRecipients) != 1 {
 		return unread
 	}
