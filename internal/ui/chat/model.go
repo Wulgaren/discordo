@@ -198,6 +198,10 @@ func (m *Model) focusMessageInput() tview.Cmd {
 // matchesFocusMessageInput: many terminals report Ctrl+I as plain Tab. Old UI fixed this in
 // Pages SetInputCapture (ebd226f). We only accept that Tab from guilds/messages list so Tab
 // in the input still runs tab-complete.
+//
+// After focus changes (e.g. opening a URL in an external browser), tcell may instead deliver
+// Ctrl+I as KeyTab with ModCtrl or KeyRune('\t') with ModCtrl — see tcell EventKey docs — so
+// we treat those like Ctrl+I when the configured shortcut is ctrl+i.
 func (m *Model) matchesFocusMessageInput(msg *tcell.EventKey) bool {
 	if keybind.Matches(msg, m.cfg.Keybinds.FocusMessageInput.Keybind) {
 		return true
@@ -209,15 +213,26 @@ func (m *Model) matchesFocusMessageInput(msg *tcell.EventKey) bool {
 			break
 		}
 	}
-	if !wantTabAsShortcut || msg.Key() != tcell.KeyTab || msg.Modifiers() != 0 {
+	if !wantTabAsShortcut {
 		return false
 	}
 	switch m.app.Focused() {
 	case m.guildsTree, m.messagesList:
-		return true
 	default:
 		return false
 	}
+	if msg.Key() == tcell.KeyTab && msg.Modifiers() == 0 {
+		return true
+	}
+	if msg.Modifiers()&tcell.ModCtrl != 0 {
+		if msg.Key() == tcell.KeyTab {
+			return true
+		}
+		if msg.Key() == tcell.KeyRune && msg.Str() == "\t" {
+			return true
+		}
+	}
+	return false
 }
 
 // globalKeyCmd handles root-level shortcuts on chat.Model before Layers.Update runs.
