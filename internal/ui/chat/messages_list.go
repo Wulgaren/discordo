@@ -399,6 +399,14 @@ func (ml *messagesList) drawAuthor(builder *tview.LineBuilder, message discord.M
 	}
 
 	style := baseStyle.Foreground(foreground).Bold(true)
+
+	if ch := ml.chat.SelectedChannel(); ch != nil &&
+		(ch.Type == discord.DirectMessage || ch.Type == discord.GroupDM) {
+		if me, err := ml.chat.state.Cabinet.Me(); err == nil && message.Author.ID != me.ID {
+			style = ui.MergeStyle(style, ml.cfg.Theme.MessagesList.DMPeerAuthorStyle.Style)
+		}
+	}
+
 	builder.Write(name+" ", style)
 }
 

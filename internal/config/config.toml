@@ -223,6 +223,9 @@ thumb_style = {}
 [theme.messages_list]
 reply_indicator = ">"
 forwarded_indicator = "<"
+# Usernames of others in DMs / group DMs (not your own messages).
+# Foreground only (no dim): reply snippets use dim; this stays closer to white.
+dm_peer_author_style = { foreground = "#efefef" }
 
 mention_style = { foreground = "blue", attributes = "bold" }
 emoji_style = { foreground = "green" }
