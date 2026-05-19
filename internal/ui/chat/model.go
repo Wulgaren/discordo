@@ -515,14 +515,41 @@ func (m *Model) updateFooter() {
 	m.messagesList.SetFooter(footer)
 }
 
-func (m *Model) refreshChannelNodeStyle(channelID discord.ChannelID) {
-	node := m.guildsTree.findNodeByReference(channelID)
-	if node == nil {
+// refreshUnreadStyles updates sidebar unread styling for a channel.
+// Guild rows are always restyled; DMs are synced into the tree when missing.
+func (m *Model) refreshUnreadStyles(channelID discord.ChannelID) {
+	channel, ok := m.channelForSidebar(channelID)
+	if !ok {
 		return
 	}
+
+	if guildID := channel.GuildID; guildID.IsValid() {
+		if guildNode := m.guildsTree.findNodeByReference(guildID); guildNode != nil {
+			m.guildsTree.setNodeLineStyle(guildNode, m.guildsTree.guildNodeStyle(guildID))
+		}
+	} else if m.guildsTree.findNodeByReference(channelID) == nil {
+		m.guildsTree.syncDMChannelNodes()
+	}
+
+	if channelNode := m.guildsTree.findNodeByReference(channelID); channelNode != nil {
+		m.guildsTree.setNodeLineStyle(channelNode, m.guildsTree.channelNodeStyle(channel))
+	}
+}
+
+func (m *Model) channelForSidebar(channelID discord.ChannelID) (discord.Channel, bool) {
 	channel, err := m.state.Cabinet.Channel(channelID)
-	if err != nil {
-		return
+	if err == nil {
+		return *channel, true
 	}
-	m.guildsTree.setNodeLineStyle(node, m.guildsTree.channelNodeStyle(*channel))
+
+	channels, err := m.state.PrivateChannels()
+	if err != nil {
+		return discord.Channel{}, false
+	}
+	for _, ch := range channels {
+		if ch.ID == channelID {
+			return ch, true
+		}
+	}
+	return discord.Channel{}, false
 }

@@ -15,14 +15,16 @@ import (
 	"github.com/diamondburned/ningen/v3"
 )
 
-func Notify(state *ningen.State, message gateway.MessageCreateEvent, cfg *config.Config) error {
+// Notify shows a desktop notification when appropriate. The bool is true when a
+// notification was actually shown.
+func Notify(state *ningen.State, message gateway.MessageCreateEvent, cfg *config.Config) (bool, error) {
 	if !cfg.Notifications.Enabled || cfg.Status == discord.DoNotDisturbStatus {
-		return nil
+		return false, nil
 	}
 
 	mentions := state.MessageMentions(&message.Message)
 	if mentions == 0 {
-		return nil
+		return false, nil
 	}
 
 	// Handle sent files
@@ -32,20 +34,20 @@ func Notify(state *ningen.State, message gateway.MessageCreateEvent, cfg *config
 	}
 
 	if content == "" {
-		return nil
+		return false, nil
 	}
 
 	title := message.Author.DisplayOrUsername()
 
 	channel, err := state.Cabinet.Channel(message.ChannelID)
 	if err != nil {
-		return fmt.Errorf("failed to get channel from state: %w", err)
+		return false, fmt.Errorf("failed to get channel from state: %w", err)
 	}
 
 	if channel.GuildID.IsValid() {
 		guild, err := state.Cabinet.Guild(channel.GuildID)
 		if err != nil {
-			return fmt.Errorf("failed to get guild from state: %w", err)
+			return false, fmt.Errorf("failed to get guild from state: %w", err)
 		}
 
 		if member := message.Member; member != nil && member.Nick != "" {
@@ -67,10 +69,10 @@ func Notify(state *ningen.State, message gateway.MessageCreateEvent, cfg *config
 
 	shouldChime := cfg.Notifications.Sound.Enabled && (!cfg.Notifications.Sound.OnlyOnPing || mentions.Has(ningen.MessageMentions|ningen.MessageNotifies))
 	if err := sendDesktopNotification(title, content, imagePath, shouldChime, cfg.Notifications.Duration); err != nil {
-		return err
+		return false, err
 	}
 
-	return nil
+	return true, nil
 }
 
 func getCachedProfileImage(avatarHash discord.Hash, url string) (string, error) {

@@ -65,7 +65,7 @@ func (gt *guildsTree) resetNodeIndex() {
 	gt.dmRootNode = nil
 }
 
-func (gt *guildsTree) createFolderNode(folder gateway.GuildFolder, guildsByID map[discord.GuildID]*gateway.GuildCreateEvent) {
+func (gt *guildsTree) createFolderNode(folder gateway.GuildFolder, guildsByID map[discord.GuildID]discord.Guild) {
 	name := "Folder"
 	if folder.Name != "" {
 		name = folder.Name
@@ -79,8 +79,8 @@ func (gt *guildsTree) createFolderNode(folder gateway.GuildFolder, guildsByID ma
 	gt.GetRoot().AddChild(folderNode)
 
 	for _, guildID := range folder.GuildIDs {
-		if guildEvent, ok := guildsByID[guildID]; ok {
-			gt.createGuildNode(folderNode, guildEvent.Guild)
+		if guild, ok := guildsByID[guildID]; ok {
+			gt.createGuildNode(folderNode, guild)
 		}
 	}
 }
@@ -106,12 +106,15 @@ func (gt *guildsTree) unreadIndication(ch discord.Channel) ningen.UnreadIndicati
 	opts := ningen.UnreadOpts{IncludeMutedCategories: true}
 	rs := s.ReadState.ReadState(ch.ID)
 	if rs == nil {
-		// ReadState hides entries with no ack cursor yet; DMs often stay "invisible"
-		// until first read. If we have a last message, treat as unread.
-		if !ch.GuildID.IsValid() && ch.LastMessageID.IsValid() {
-			return ningen.ChannelUnread
+		// ReadState omits entries until LastMessageID is set. With no local cursor but
+		// a latest message, treat as unread (DMs always did; guilds need the same).
+		if !ch.LastMessageID.IsValid() {
+			return ningen.ChannelRead
 		}
-		return ningen.ChannelRead
+		if ch.GuildID.IsValid() && !s.HasPermissions(ch.ID, discord.PermissionViewChannel) {
+			return ningen.ChannelRead
+		}
+		return ningen.ChannelUnread
 	}
 	if rs.MentionCount > 0 {
 		return ningen.ChannelMentioned
@@ -208,6 +211,34 @@ func (gt *guildsTree) createGuildNode(n *tview.TreeNode, guild discord.Guild) {
 	gt.setNodeLineStyle(guildNode, gt.guildNodeStyle(guild.ID))
 	n.AddChild(guildNode)
 	gt.guildNodeByID[guild.ID] = guildNode
+}
+
+// syncDMChannelNodes rebuilds Direct Messages children from state (sorted).
+// Call when a DM is active but not yet listed in the tree.
+func (gt *guildsTree) syncDMChannelNodes() {
+	dmRoot := gt.dmRootNode
+	if dmRoot == nil {
+		return
+	}
+
+	channels, err := gt.chat.state.PrivateChannels()
+	if err != nil {
+		slog.Error("failed to get private channels", "err", err)
+		return
+	}
+
+	ui.SortPrivateChannels(channels)
+
+	for _, child := range dmRoot.GetChildren() {
+		if id, ok := child.GetReference().(discord.ChannelID); ok {
+			delete(gt.channelNodeByID, id)
+		}
+	}
+	dmRoot.ClearChildren()
+
+	for _, channel := range channels {
+		gt.createChannelNode(dmRoot, channel)
+	}
 }
 
 func (gt *guildsTree) createChannelNode(node *tview.TreeNode, channel discord.Channel) {
