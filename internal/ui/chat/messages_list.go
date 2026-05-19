@@ -182,7 +182,7 @@ func (ml *messagesList) buildItem(index int) list.Item {
 	}
 
 	message := ml.messages[row.messageIndex]
-	if index == ml.Cursor() {
+	if index == ml.Model.Cursor() {
 		return tview.NewTextView().
 			SetWrap(true).
 			SetWordWrap(true).
