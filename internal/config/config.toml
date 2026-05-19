@@ -110,8 +110,8 @@ quit = "ctrl+c"
 
 [keybinds.picker]
 cancel = "esc"
-up = "ctrl+p"
-down = "ctrl+n"
+up = ["ctrl+p", "up"]
+down = ["ctrl+n", "down"]
 top = "home"
 bottom = "end"
 select = "enter"

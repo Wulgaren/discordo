@@ -40,6 +40,15 @@ func newKeybind(key, desc string) Keybind {
 	}
 }
 
+func newKeybinds(keys []string, helpKey, desc string) Keybind {
+	return Keybind{
+		Keybind: keybind.NewKeybind(
+			keybind.WithKeys(keys...),
+			keybind.WithHelp(helpKey, desc),
+		),
+	}
+}
+
 type NavigationKeybinds struct {
 	Up     Keybind `toml:"up"`
 	Down   Keybind `toml:"down"`
@@ -137,8 +146,8 @@ type Keybinds struct {
 func defaultPickerKeybinds() PickerKeybinds {
 	return PickerKeybinds{
 		NavigationKeybinds: NavigationKeybinds{
-			Up:     newKeybind("ctrl+p", "up"),
-			Down:   newKeybind("ctrl+n", "down"),
+			Up:     newKeybinds([]string{"ctrl+p", "up"}, "up", "up"),
+			Down:   newKeybinds([]string{"ctrl+n", "down"}, "down", "down"),
 			Top:    newKeybind("home", "top"),
 			Bottom: newKeybind("end", "bottom"),
 		},

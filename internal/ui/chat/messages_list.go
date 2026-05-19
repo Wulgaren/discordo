@@ -169,7 +169,7 @@ func (ml *messagesList) clearSelection() {
 	ml.SetCursor(-1)
 }
 
-func (ml *messagesList) buildItem(index int, cursor int) list.Item {
+func (ml *messagesList) buildItem(index int) list.Item {
 	ml.ensureRows()
 
 	if index < 0 || index >= len(ml.rows) {
@@ -182,7 +182,7 @@ func (ml *messagesList) buildItem(index int, cursor int) list.Item {
 	}
 
 	message := ml.messages[row.messageIndex]
-	if index == cursor {
+	if index == ml.Cursor() {
 		return tview.NewTextView().
 			SetWrap(true).
 			SetWordWrap(true).

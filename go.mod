@@ -7,11 +7,11 @@ require (
 	github.com/alecthomas/chroma/v2 v2.24.1
 	github.com/andybalholm/brotli v1.2.1
 	github.com/ayn2op/clipboard v0.0.0-20260308203959-c5ad7df3fc97
-	github.com/ayn2op/tview v0.0.0-20260430174453-fefba5ec2dd5
+	github.com/ayn2op/tview v0.0.0-20260518065412-67dde5e23f28
 	github.com/deckarep/gosx-notifier v0.0.0-20180201035817-e127226297fb
 	github.com/diamondburned/arikawa/v3 v3.6.1-0.20260311205148-176ad9b9440f
 	github.com/diamondburned/ningen/v3 v3.0.1-0.20260306213430-5a08d3a709b4
-	github.com/gdamore/tcell/v3 v3.3.0
+	github.com/gdamore/tcell/v3 v3.4.1-0.20260518052729-a8f959fc4712
 	github.com/gen2brain/beeep v0.11.2
 	github.com/google/go-cmp v0.6.0
 	github.com/google/uuid v1.6.0
@@ -53,8 +53,8 @@ require (
 	golang.org/x/exp/shiny v0.0.0-20260410095643-746e56fc9e2f // indirect
 	golang.org/x/image v0.39.0 // indirect
 	golang.org/x/mobile v0.0.0-20260410095206-2cfb76559b7b // indirect
-	golang.org/x/sys v0.43.0 // indirect
-	golang.org/x/term v0.42.0 // indirect
-	golang.org/x/text v0.36.0 // indirect
+	golang.org/x/sys v0.44.0 // indirect
+	golang.org/x/term v0.43.0 // indirect
+	golang.org/x/text v0.37.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
 )

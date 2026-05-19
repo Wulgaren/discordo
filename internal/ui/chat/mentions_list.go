@@ -31,7 +31,9 @@ func newMentionsList(cfg *config.Config) *mentionsList {
 	})
 
 	m.Box = ui.ConfigureBox(m.Box, &cfg.Theme)
-	m.SetSnapToItems(true).SetTitle("Mentions")
+	m.SetSelectedStyle(tcell.StyleDefault.Reverse(true)).
+		SetSnapToItems(true).
+		SetTitle("Mentions")
 
 	b := m.GetBorderSet()
 	b.BottomLeft, b.BottomRight = b.BottomT, b.BottomT
@@ -50,23 +52,19 @@ func (m *mentionsList) clear() {
 }
 
 func (m *mentionsList) rebuild() {
-	m.SetBuilder(func(index int, cursor int) list.Item {
+	m.SetBuilder(func(index int) list.Item {
 		if index < 0 || index >= len(m.items) {
 			return nil
 		}
 
 		item := m.items[index]
-		style := item.style
-		if index == cursor {
-			style = style.Reverse(true)
-		}
-		line := tview.NewLine(tview.NewSegment(item.displayText, style))
+		line := tview.NewLine(tview.NewSegment(item.displayText, item.style))
 
 		return tview.NewTextView().
 			SetScrollable(false).
 			SetWrap(false).
 			SetWordWrap(false).
-			SetTextStyle(style).
+			SetTextStyle(item.style).
 			SetLines([]tview.Line{line})
 	})
 

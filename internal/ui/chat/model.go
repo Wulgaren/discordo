@@ -145,15 +145,15 @@ func (m *Model) buildLayout() {
 	)
 }
 
-func (m *Model) togglePicker() {
+func (m *Model) togglePicker() tview.Cmd {
 	if m.HasLayer(channelsPickerLayerName) {
 		m.closePicker()
-	} else {
-		m.openPicker()
+		return nil
 	}
+	return m.openPicker()
 }
 
-func (m *Model) openPicker() {
+func (m *Model) openPicker() tview.Cmd {
 	m.AddLayer(
 		ui.Centered(m.channelsPicker, m.cfg.Picker.Width, m.cfg.Picker.Height),
 		layers.WithName(channelsPickerLayerName),
@@ -162,6 +162,7 @@ func (m *Model) openPicker() {
 		layers.WithOverlay(),
 	).SendToFront(channelsPickerLayerName)
 	m.channelsPicker.update()
+	return tview.SetFocus(m.channelsPicker)
 }
 
 func (m *Model) closePicker() {
@@ -257,8 +258,7 @@ func (m *Model) globalKeyCmd(msg tview.Msg) tview.Cmd {
 	case keybind.Matches(keyMsg, m.cfg.Keybinds.ToggleGuildsTree.Keybind):
 		return m.toggleGuildsTree()
 	case keybind.Matches(keyMsg, m.cfg.Keybinds.ToggleChannelsPicker.Keybind):
-		m.togglePicker()
-		return nil
+		return m.togglePicker()
 	case keybind.Matches(keyMsg, m.cfg.Keybinds.Logout.Keybind):
 		return tview.Sequence(m.closeState(), m.logout())
 	}
