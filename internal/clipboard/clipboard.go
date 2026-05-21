@@ -1,3 +1,5 @@
+//go:build !linux && !freebsd
+
 package clipboard
 
 import "github.com/ayn2op/clipboard"

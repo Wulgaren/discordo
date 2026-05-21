@@ -32,9 +32,12 @@ cd discordo
 go build .
 ```
 
-### Wayland clipboard support
+### Linux clipboard support
 
-`wl-clipboard` is required for clipboard support.
+Clipboard support uses external tools (no X11 build dependency):
+
+- Wayland: [wl-clipboard](https://github.com/bugaevc/wl-clipboard) (`wl-copy`, `wl-paste`)
+- X11: `xclip` (images and text) or `xsel` (text only)
 
 ## Usage
 

@@ -24,9 +24,9 @@ jobs:
         with:
           go-version: stable
 
-      - name: Install libx11-dev for clipboard support
+      - name: Install clipboard tools
         if: runner.os == 'Linux'
-        run: sudo apt install libx11-dev
+        run: sudo apt install wl-clipboard xclip
 
       - name: Test
         run: go test -v ./...
