@@ -3,6 +3,7 @@ package chat
 import (
 	"fmt"
 	"log/slog"
+	"slices"
 	"sync"
 	"time"
 
@@ -192,33 +193,50 @@ func (m *Model) focusGuildsTree() tview.Cmd {
 	return nil
 }
 
+// focusMessageInput dismisses any overlays that would otherwise cover or
+// steal input from the message input before focusing it.
 func (m *Model) focusMessageInput() tview.Cmd {
+	m.messageInput.removeMentionsList()
+	if m.HasLayer(channelsPickerLayerName) {
+		m.closePicker()
+	}
+	if m.HasLayer(attachmentsPickerLayerName) {
+		m.RemoveLayer(attachmentsPickerLayerName)
+	}
 	return tview.SetFocus(m.messageInput)
 }
 
-// matchesFocusMessageInput: many terminals report Ctrl+I as plain Tab. Old UI fixed this in
-// Pages SetInputCapture (ebd226f). We only accept that Tab from guilds/messages list so Tab
-// in the input still runs tab-complete.
+// matchesFocusMessageInput reports whether msg should trigger focus_message_input.
+//
+// Legacy terminals (e.g. macOS Terminal.app) cannot distinguish Ctrl+I from
+// Tab: both arrive as byte 0x09, which tcell decodes as a plain KeyTab. When
+// the configured shortcut is ctrl+i, plain Tab is treated as the shortcut
+// everywhere except where Tab has a real function (mention completion in the
+// input, button cycling in the confirm modal). Blacklisting Tab consumers
+// instead of whitelisting focus targets keeps the shortcut working when focus
+// ends up in an unexpected state, e.g. after opening a link and returning to
+// the app.
 func (m *Model) matchesFocusMessageInput(msg *tcell.EventKey) bool {
 	if keybind.Matches(msg, m.cfg.Keybinds.FocusMessageInput.Keybind) {
 		return true
 	}
-	wantTabAsShortcut := false
-	for _, k := range m.cfg.Keybinds.FocusMessageInput.Keys() {
-		if k == "ctrl+i" {
-			wantTabAsShortcut = true
-			break
-		}
-	}
-	if !wantTabAsShortcut || msg.Key() != tcell.KeyTab || msg.Modifiers() != 0 {
+	if msg.Key() != tcell.KeyTab || msg.Modifiers() != 0 {
 		return false
 	}
-	switch m.app.Focused() {
-	case m.guildsTree, m.messagesList:
-		return true
-	default:
+	if !slices.Contains(m.cfg.Keybinds.FocusMessageInput.Keys(), "ctrl+i") {
 		return false
 	}
+	// No channel selected or no send permission; leave Tab to other widgets.
+	if m.messageInput.GetDisabled() {
+		return false
+	}
+	if m.HasLayer(confirmModalLayerName) {
+		return false
+	}
+	if m.app.Focused() == m.messageInput && m.messageInput.mentionTabPending() {
+		return false
+	}
+	return true
 }
 
 // globalKeyCmd handles root-level shortcuts on chat.Model before Layers.Update runs.

@@ -105,6 +105,19 @@ func (mi *messageInput) stopTypingTimer() {
 	}
 }
 
+// mentionTabPending reports whether Tab should run mention completion instead
+// of acting as the focus_message_input shortcut. Mirrors the mention context
+// check in tabComplete.
+func (mi *messageInput) mentionTabPending() bool {
+	if mi.chat.GetVisible(mentionsListLayerName) {
+		return true
+	}
+	_, _, r := mi.GetWordUnderCursor(func(r rune) bool {
+		return unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' || r == '.'
+	})
+	return r == '@'
+}
+
 func (mi *messageInput) Update(msg tview.Msg) tview.Cmd {
 	handler := mi.TextArea.Update
 	switch msg := msg.(type) {
