@@ -1,10 +1,10 @@
-# Whether to focus the message input automatically when a channel is selected.
+# Whether to focus the composer automatically when a channel is selected.
 # Set to false to preview channels without moving focus.
 auto_focus = true
 
 # Whether to enable mouse or not.
 mouse = true
-# The program to open when the `message_input.editor` keybind is pressed. Set the value to `"default"` to use `$EDITOR`.
+# The program to open when the `composer.open_editor` keybind is pressed. Set the value to `"default"` to use `$EDITOR`.
 editor = "default"
 
 # "default" (unknown), "online", "dnd", "idle", "invisible", "offline"
@@ -19,6 +19,11 @@ autocomplete_limit = 20
 
 # The number of messages to fetch when a text-based channel is selected from guilds tree. The minimum and maximum value is 0 and 100, respectively.
 messages_limit = 50
+
+[composer]
+# Maximum height (in newline-separated rows) the composer grows to before it starts scrolling internally.
+# Set to 1 for a fixed single-line input.
+max_height = 10
 
 [markdown]
 # Whether to parse and render markdown in messages or not.
@@ -98,7 +103,7 @@ toggle_channels_picker = "ctrl+k"
 toggle_help = "ctrl+."
 focus_guilds_tree = "ctrl+g"
 focus_messages_list = "ctrl+t"
-focus_message_input = "ctrl+i"
+focus_composer = "ctrl+i"
 # Cycle focus between the widgets.
 focus_previous = "ctrl+h"
 focus_next = "ctrl+l"
@@ -159,11 +164,12 @@ yank_url = "u"
 yank_id = "i"
 
 # Only while typing a message
-# Alt+Enter: Insert a new line to the current text.
-[keybinds.message_input]
-# paste from clipboard (supports both text and images)
+[keybinds.composer]
+# Paste from clipboard (supports both text and images)
 paste = "ctrl+v"
 send = "enter"
+# Insert a new line at the cursor.
+newline = "shift+enter"
 # Remove existing text or cancel reply.
 cancel = "esc"
 # Complete usernames when mentioning

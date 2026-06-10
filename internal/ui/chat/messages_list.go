@@ -2,7 +2,6 @@ package chat
 
 import (
 	"context"
-	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -52,7 +51,7 @@ type messagesList struct {
 	rowsDirty bool
 
 	renderer *markdown.Renderer
-	// itemByID caches unselected message TextViews.
+	// itemByID caches rendered message TextViews.
 	itemByID map[discord.MessageID]*tview.TextView
 
 	attachmentsPicker *attachmentsPicker
@@ -95,6 +94,7 @@ func newMessagesList(cfg *config.Config, chat *Model) *messagesList {
 	ml.SetBuilder(ml.buildItem)
 	ml.SetChangedFunc(ml.onRowCursorChanged)
 	ml.SetTrackEnd(true)
+	ml.SetSelectedStyle(cfg.Theme.MessagesList.SelectedMessageStyle.Style)
 	ml.SetKeybinds(list.Keybinds{
 		ScrollUp:     cfg.Keybinds.MessagesList.ScrollUp.Keybind,
 		ScrollDown:   cfg.Keybinds.MessagesList.ScrollDown.Keybind,
@@ -181,14 +181,10 @@ func (ml *messagesList) buildItem(index int) list.Item {
 		return ml.buildSeparatorItem(row.timestamp)
 	}
 
+	// The list applies the selection style at draw time, so a message is
+	// rendered once and reused for every cursor position. Cursor moves no
+	// longer re-parse markdown or re-run syntax highlighting.
 	message := ml.messages[row.messageIndex]
-	if index == ml.Model.Cursor() {
-		return tview.NewTextView().
-			SetWrap(true).
-			SetWordWrap(true).
-			SetLines(ml.renderMessage(message, ml.cfg.Theme.MessagesList.SelectedMessageStyle.Style))
-	}
-
 	item, ok := ml.itemByID[message.ID]
 	if !ok {
 		item = tview.NewTextView().
@@ -400,10 +396,10 @@ func (ml *messagesList) drawAuthor(builder *tview.LineBuilder, message discord.M
 
 	style := baseStyle.Foreground(foreground).Bold(true)
 
-	if ch := ml.chat.SelectedChannel(); ch != nil &&
+	if ch, ok := ml.chat.SelectedChannel(); ok &&
 		(ch.Type == discord.DirectMessage || ch.Type == discord.GroupDM) {
 		if me, err := ml.chat.state.Cabinet.Me(); err == nil && message.Author.ID != me.ID {
-			style = ui.MergeStyle(style, ml.cfg.Theme.MessagesList.DMPeerAuthorStyle.Style)
+			style = tview.MergeStyle(style, ml.cfg.Theme.MessagesList.DMPeerAuthorStyle.Style)
 		}
 	}
 
@@ -424,8 +420,12 @@ func (ml *messagesList) memberForMessage(message discord.Message) *discord.Membe
 	return member
 }
 
-func (ml *messagesList) drawContent(builder *tview.LineBuilder, message discord.Message, baseStyle tcell.Style) {
-	lines, root := ml.renderContentLines(message, baseStyle)
+// drawContent renders the message body and returns the parsed markdown AST
+// together with the source bytes it indexes into, so callers can reuse them
+// instead of re-parsing the same content (see drawEmbeds). root is nil when
+// markdown rendering is disabled.
+func (ml *messagesList) drawContent(builder *tview.LineBuilder, message discord.Message, baseStyle tcell.Style) (ast.Node, []byte) {
+	lines, root, source := ml.renderContentLines(message, baseStyle)
 	if ml.cfg.Markdown.Enabled && builder.HasCurrentLine() {
 		startsWithCodeBlock := false
 		if root != nil {
@@ -447,23 +447,24 @@ func (ml *messagesList) drawContent(builder *tview.LineBuilder, message discord.
 		}
 	}
 	builder.AppendLines(lines)
+	return root, source
 }
 
-func (ml *messagesList) renderContentLines(message discord.Message, baseStyle tcell.Style) ([]tview.Line, ast.Node) {
+func (ml *messagesList) renderContentLines(message discord.Message, baseStyle tcell.Style) ([]tview.Line, ast.Node, []byte) {
 	return ml.renderContentLinesWithMarkdown(message, baseStyle, false)
 }
 
-func (ml *messagesList) renderContentLinesWithMarkdown(message discord.Message, baseStyle tcell.Style, forceMarkdown bool) ([]tview.Line, ast.Node) {
+func (ml *messagesList) renderContentLinesWithMarkdown(message discord.Message, baseStyle tcell.Style, forceMarkdown bool) ([]tview.Line, ast.Node, []byte) {
 	// Keep one rendering path for both normal messages and embed fragments so we preserve mention/link parsing behavior consistently across both.
 	if forceMarkdown || ml.cfg.Markdown.Enabled {
 		c := []byte(message.Content)
 		root := discordmd.ParseWithMessage(c, *ml.chat.state.Cabinet, &message, false)
-		return ml.renderer.RenderLines(c, root, baseStyle), root
+		return ml.renderer.RenderLines(c, root, baseStyle), root, c
 	}
 
 	b := tview.NewLineBuilder()
 	b.Write(message.Content, baseStyle)
-	return b.Finish(), nil
+	return b.Finish(), nil, nil
 }
 
 func (ml *messagesList) drawSnapshotContent(builder *tview.LineBuilder, parent discord.Message, snapshot discord.MessageSnapshotMessage, baseStyle tcell.Style) {
@@ -492,16 +493,16 @@ func (ml *messagesList) drawDefaultMessage(builder *tview.LineBuilder, message d
 	}
 
 	ml.drawAuthor(builder, message, baseStyle)
-	ml.drawContent(builder, message, baseStyle)
+	contentRoot, contentSource := ml.drawContent(builder, message, baseStyle)
 
 	if message.EditedTimestamp.IsValid() {
 		dimStyle := baseStyle.Dim(true)
 		builder.Write(" (edited)", dimStyle)
 	}
 
-	ml.drawEmbeds(builder, message, baseStyle)
+	ml.drawEmbeds(builder, message, baseStyle, contentRoot, contentSource)
 
-	attachmentStyle := ui.MergeStyle(baseStyle, ml.cfg.Theme.MessagesList.AttachmentStyle.Style)
+	attachmentStyle := tview.MergeStyle(baseStyle, ml.cfg.Theme.MessagesList.AttachmentStyle.Style)
 	for _, a := range message.Attachments {
 		builder.NewLine()
 		if ml.cfg.ShowAttachmentLinks {
@@ -512,12 +513,20 @@ func (ml *messagesList) drawDefaultMessage(builder *tview.LineBuilder, message d
 	}
 }
 
-func (ml *messagesList) drawEmbeds(builder *tview.LineBuilder, message discord.Message, baseStyle tcell.Style) {
+func (ml *messagesList) drawEmbeds(builder *tview.LineBuilder, message discord.Message, baseStyle tcell.Style, contentRoot ast.Node, contentSource []byte) {
 	if len(message.Embeds) == 0 {
 		return
 	}
 
-	contentListURLs := extractURLs(message.Content)
+	// Embed URLs are deduplicated against links already shown in the message
+	// body. Reuse the body's parsed AST when markdown is enabled; only the
+	// markdown-disabled path (no AST) has to parse the content here.
+	var contentListURLs []string
+	if contentRoot != nil {
+		contentListURLs = urlsFromAST(contentRoot, contentSource)
+	} else {
+		contentListURLs = extractURLs(message.Content)
+	}
 	contentURLs := make(map[string]struct{}, len(contentListURLs))
 	for _, u := range contentListURLs {
 		contentURLs[u] = struct{}{}
@@ -526,7 +535,7 @@ func (ml *messagesList) drawEmbeds(builder *tview.LineBuilder, message discord.M
 	lineStyles := embedLineStyles(baseStyle, ml.cfg.Theme.MessagesList.Embeds)
 	defaultBarStyle := baseStyle.Dim(true)
 	prefixText := "  ▎ "
-	prefixWidth := tview.TaggedStringWidth(prefixText)
+	prefixWidth := uniseg.StringWidth(prefixText)
 	_, _, innerWidth, _ := ml.InnerRect()
 	// Wrap against the current list viewport. This keeps embed wrapping stable even when sidebars/panes are resized.
 	wrapWidth := max(innerWidth-prefixWidth, 1)
@@ -552,7 +561,7 @@ func (ml *messagesList) drawEmbeds(builder *tview.LineBuilder, message discord.M
 			msg.Content = line.Text
 			lineStyle := lineStyles[line.Kind]
 			// Embed descriptions are always markdown-rendered to match Discord's rich embed semantics, even when message markdown is globally disabled.
-			rendered, _ := ml.renderContentLinesWithMarkdown(msg, lineStyle, line.Kind == embedLineDescription)
+			rendered, _, _ := ml.renderContentLinesWithMarkdown(msg, lineStyle, line.Kind == embedLineDescription)
 			for _, renderedLine := range rendered {
 				if line.URL != "" {
 					renderedLine = lineWithURL(renderedLine, line.URL)
@@ -673,14 +682,14 @@ const (
 
 func embedLineStyles(baseStyle tcell.Style, theme config.MessagesListEmbedsTheme) [8]tcell.Style {
 	styles := [8]tcell.Style{}
-	styles[embedLineProvider] = ui.MergeStyle(baseStyle, theme.ProviderStyle.Style)
-	styles[embedLineAuthor] = ui.MergeStyle(baseStyle, theme.AuthorStyle.Style)
-	styles[embedLineTitle] = ui.MergeStyle(baseStyle, theme.TitleStyle.Style)
-	styles[embedLineDescription] = ui.MergeStyle(baseStyle, theme.DescriptionStyle.Style)
-	styles[embedLineFieldName] = ui.MergeStyle(baseStyle, theme.FieldNameStyle.Style)
-	styles[embedLineFieldValue] = ui.MergeStyle(baseStyle, theme.FieldValueStyle.Style)
-	styles[embedLineFooter] = ui.MergeStyle(baseStyle, theme.FooterStyle.Style)
-	styles[embedLineURL] = ui.MergeStyle(baseStyle, theme.URLStyle.Style)
+	styles[embedLineProvider] = tview.MergeStyle(baseStyle, theme.ProviderStyle.Style)
+	styles[embedLineAuthor] = tview.MergeStyle(baseStyle, theme.AuthorStyle.Style)
+	styles[embedLineTitle] = tview.MergeStyle(baseStyle, theme.TitleStyle.Style)
+	styles[embedLineDescription] = tview.MergeStyle(baseStyle, theme.DescriptionStyle.Style)
+	styles[embedLineFieldName] = tview.MergeStyle(baseStyle, theme.FieldNameStyle.Style)
+	styles[embedLineFieldValue] = tview.MergeStyle(baseStyle, theme.FieldValueStyle.Style)
+	styles[embedLineFooter] = tview.MergeStyle(baseStyle, theme.FooterStyle.Style)
+	styles[embedLineURL] = tview.MergeStyle(baseStyle, theme.URLStyle.Style)
 	return styles
 }
 
@@ -839,17 +848,17 @@ func (ml *messagesList) drawPinnedMessage(builder *tview.LineBuilder, message di
 	builder.Write(" pinned a message.", baseStyle)
 }
 
-func (ml *messagesList) selectedMessage() (*discord.Message, error) {
+func (ml *messagesList) selectedMessage() (*discord.Message, bool) {
 	if len(ml.messages) == 0 {
-		return nil, errors.New("no messages available")
+		return nil, false
 	}
 
 	cursor := ml.Cursor()
 	if cursor == -1 || cursor >= len(ml.messages) {
-		return nil, errors.New("no message is currently selected")
+		return nil, false
 	}
 
-	return &ml.messages[cursor], nil
+	return &ml.messages[cursor], true
 }
 
 func (ml *messagesList) Update(msg tview.Msg) tview.Cmd {
@@ -896,8 +905,8 @@ func (ml *messagesList) Update(msg tview.Msg) tview.Cmd {
 		return ml.Model.Update(msg)
 
 	case olderMessagesLoadedMsg:
-		selectedChannel := ml.chat.SelectedChannel()
-		if selectedChannel == nil || selectedChannel.ID != msg.ChannelID {
+		selectedChannel, ok := ml.chat.SelectedChannel()
+		if !ok || selectedChannel.ID != msg.ChannelID {
 			return nil
 		}
 		prevCursor := ml.Cursor()
@@ -997,8 +1006,8 @@ func (ml *messagesList) selectReply() {
 }
 
 func (ml *messagesList) fetchOlderMessages() tview.Cmd {
-	selectedChannel := ml.chat.SelectedChannel()
-	if selectedChannel == nil {
+	selectedChannel, ok := ml.chat.SelectedChannel()
+	if !ok {
 		return nil
 	}
 
@@ -1021,19 +1030,18 @@ func (ml *messagesList) fetchOlderMessages() tview.Cmd {
 
 		older := slices.Clone(messages)
 		slices.Reverse(older)
-		return newOlderMessagesLoadedMsg(channelID, older)
+		return olderMessagesLoadedMsg{ChannelID: channelID, Older: older}
 	}
 }
 
 func (ml *messagesList) yankMessageID() tview.Cmd {
-	msg, err := ml.selectedMessage()
-	if err != nil {
-		slog.Error("failed to get selected message", "err", err)
+	selectedMessage, ok := ml.selectedMessage()
+	if !ok {
 		return nil
 	}
 
 	return func() tview.Msg {
-		if err := clipboard.Write(clipboard.FmtText, []byte(msg.ID.String())); err != nil {
+		if err := clipboard.Write(clipboard.FmtText, []byte(selectedMessage.ID.String())); err != nil {
 			slog.Error("failed to copy message id", "err", err)
 		}
 		return nil
@@ -1041,14 +1049,13 @@ func (ml *messagesList) yankMessageID() tview.Cmd {
 }
 
 func (ml *messagesList) yankContent() tview.Cmd {
-	msg, err := ml.selectedMessage()
-	if err != nil {
-		slog.Error("failed to get selected message", "err", err)
+	selectedMessage, ok := ml.selectedMessage()
+	if !ok {
 		return nil
 	}
 
 	return func() tview.Msg {
-		if err := clipboard.Write(clipboard.FmtText, []byte(msg.Content)); err != nil {
+		if err := clipboard.Write(clipboard.FmtText, []byte(selectedMessage.Content)); err != nil {
 			slog.Error("failed to copy message content", "err", err)
 		}
 		return nil
@@ -1056,14 +1063,13 @@ func (ml *messagesList) yankContent() tview.Cmd {
 }
 
 func (ml *messagesList) yankURL() tview.Cmd {
-	msg, err := ml.selectedMessage()
-	if err != nil {
-		slog.Error("failed to get selected message", "err", err)
+	selectedMessage, ok := ml.selectedMessage()
+	if !ok {
 		return nil
 	}
 
 	return func() tview.Msg {
-		if err := clipboard.Write(clipboard.FmtText, []byte(msg.URL())); err != nil {
+		if err := clipboard.Write(clipboard.FmtText, []byte(selectedMessage.URL())); err != nil {
 			slog.Error("failed to copy message url", "err", err)
 		}
 		return nil
@@ -1071,33 +1077,26 @@ func (ml *messagesList) yankURL() tview.Cmd {
 }
 
 func (ml *messagesList) open() tview.Cmd {
-	msg, err := ml.selectedMessage()
-	if err != nil {
-		slog.Error("failed to get selected message", "err", err)
+	selectedMessage, ok := ml.selectedMessage()
+	if !ok {
 		return nil
 	}
 
-	urls := messageURLs(*msg)
-
-	if len(urls) == 0 && len(msg.Attachments) == 0 {
+	urls := messageURLs(*selectedMessage)
+	switch total := len(urls) + len(selectedMessage.Attachments); {
+	case total == 0:
 		return nil
+	case total > 1:
+		return ml.showAttachmentsList(urls, selectedMessage.Attachments)
+	case len(urls) == 1:
+		return ml.openURL(urls[0])
 	}
 
-	if len(urls)+len(msg.Attachments) == 1 {
-		if len(urls) == 1 {
-			go ml.openURL(urls[0])
-		} else {
-			attachment := msg.Attachments[0]
-			if strings.HasPrefix(attachment.ContentType, "image/") {
-				go ml.openAttachment(msg.Attachments[0])
-			} else {
-				go ml.openURL(attachment.URL)
-			}
-		}
-	} else {
-		return ml.showAttachmentsList(urls, msg.Attachments)
+	attachment := selectedMessage.Attachments[0]
+	if strings.HasPrefix(attachment.ContentType, "image/") {
+		return ml.openAttachment(attachment)
 	}
-	return nil
+	return ml.openURL(attachment.URL)
 }
 
 func extractURLs(content string) []string {
@@ -1106,7 +1105,13 @@ func extractURLs(content string) []string {
 		parser.WithBlockParsers(discordmd.BlockParsers()...),
 		parser.WithInlineParsers(discordmd.InlineParserWithLink()...),
 	).Parse(text.NewReader(src))
+	return urlsFromAST(node, src)
+}
 
+// urlsFromAST collects link destinations from an already-parsed markdown AST.
+// src must be the byte slice the node was parsed from (AutoLink resolves its
+// URL against it).
+func urlsFromAST(node ast.Node, src []byte) []string {
 	var urls []string
 	ast.Walk(node, func(n ast.Node, entering bool) (ast.WalkStatus, error) {
 		if entering {
@@ -1163,23 +1168,20 @@ func (ml *messagesList) showAttachmentsList(urls []string, attachments []discord
 	var items []attachmentItem
 	for _, a := range attachments {
 		attachment := a
-		action := func() {
-			if strings.HasPrefix(attachment.ContentType, "image/") {
-				go ml.openAttachment(attachment)
-			} else {
-				go ml.openURL(attachment.URL)
-			}
+		open := ml.openURL(attachment.URL)
+		if strings.HasPrefix(attachment.ContentType, "image/") {
+			open = ml.openAttachment(attachment)
 		}
 		items = append(items, attachmentItem{
 			label: attachment.Filename,
-			open:  action,
+			open:  open,
 		})
 	}
 	for _, u := range urls {
 		url := u
 		items = append(items, attachmentItem{
 			label: url,
-			open:  func() { go ml.openURL(url) },
+			open:  ml.openURL(url),
 		})
 	}
 	ml.attachmentsPicker.SetItems(items)
@@ -1196,65 +1198,70 @@ func (ml *messagesList) showAttachmentsList(urls []string, attachments []discord
 	return tview.SetFocus(ml.attachmentsPicker)
 }
 
-func (ml *messagesList) openAttachment(attachment discord.Attachment) {
-	resp, err := http.Get(attachment.URL)
-	if err != nil {
-		slog.Error("failed to fetch the attachment", "err", err, "url", attachment.URL)
-		return
-	}
-	defer resp.Body.Close()
+func (ml *messagesList) openAttachment(attachment discord.Attachment) tview.Cmd {
+	return func() tview.Msg {
+		resp, err := http.Get(attachment.URL)
+		if err != nil {
+			slog.Error("failed to fetch the attachment", "err", err, "url", attachment.URL)
+			return nil
+		}
+		defer resp.Body.Close()
 
-	path := filepath.Join(consts.CacheDir(), "attachments")
-	if err := os.MkdirAll(path, os.ModePerm); err != nil {
-		slog.Error("failed to create attachments dir", "err", err, "path", path)
-		return
-	}
+		path := filepath.Join(consts.CacheDir(), "attachments")
+		if err := os.MkdirAll(path, os.ModePerm); err != nil {
+			slog.Error("failed to create attachments dir", "err", err, "path", path)
+			return nil
+		}
 
-	root, err := os.OpenRoot(path)
-	if err != nil {
-		slog.Error("failed to open attachments dir", "err", err, "path", path)
-		return
-	}
-	defer root.Close()
+		root, err := os.OpenRoot(path)
+		if err != nil {
+			slog.Error("failed to open attachments dir", "err", err, "path", path)
+			return nil
+		}
+		defer root.Close()
 
-	file, err := root.Create(attachment.Filename)
-	if err != nil {
-		slog.Error("failed to create attachment file", "err", err, "filename", attachment.Filename)
-		return
-	}
-	defer file.Close()
+		file, err := root.Create(attachment.Filename)
+		if err != nil {
+			slog.Error("failed to create attachment file", "err", err, "filename", attachment.Filename)
+			return nil
+		}
+		defer file.Close()
 
-	if _, err := io.Copy(file, resp.Body); err != nil {
-		slog.Error("failed to copy attachment to file", "err", err)
-		return
-	}
+		if _, err := io.Copy(file, resp.Body); err != nil {
+			slog.Error("failed to copy attachment to file", "err", err)
+			return nil
+		}
 
-	if err := open.Start(file.Name()); err != nil {
-		slog.Error("failed to open attachment file", "err", err, "path", file.Name())
-		return
+		if err := open.Start(file.Name()); err != nil {
+			slog.Error("failed to open attachment file", "err", err, "path", file.Name())
+			return nil
+		}
+		return nil
 	}
 }
 
-func (ml *messagesList) openURL(url string) {
-	if err := open.Start(url); err != nil {
-		slog.Error("failed to open URL", "err", err, "url", url)
+func (ml *messagesList) openURL(url string) tview.Cmd {
+	return func() tview.Msg {
+		if err := open.Start(url); err != nil {
+			slog.Error("failed to open URL", "err", err, "url", url)
+		}
+		return nil
 	}
 }
 
 func (ml *messagesList) reply(mention bool) tview.Cmd {
-	message, err := ml.selectedMessage()
-	if err != nil {
-		slog.Error("failed to get selected message", "err", err)
+	selectedMessage, ok := ml.selectedMessage()
+	if !ok {
 		return nil
 	}
 
-	name := message.Author.DisplayOrUsername()
-	if member := ml.memberForMessage(*message); member != nil && member.Nick != "" {
+	name := selectedMessage.Author.DisplayOrUsername()
+	if member := ml.memberForMessage(*selectedMessage); member != nil && member.Nick != "" {
 		name = member.Nick
 	}
 
-	data := ml.chat.messageInput.sendMessageData
-	data.Reference = &discord.MessageReference{MessageID: message.ID}
+	data := ml.chat.composer.sendMessageData
+	data.Reference = &discord.MessageReference{MessageID: selectedMessage.ID}
 	data.AllowedMentions = &api.AllowedMentions{RepliedUser: option.False}
 
 	title := "Replying to "
@@ -1263,9 +1270,9 @@ func (ml *messagesList) reply(mention bool) tview.Cmd {
 		title = "[@] " + title
 	}
 
-	ml.chat.messageInput.sendMessageData = data
-	ml.chat.messageInput.SetTitle(title + name)
-	return tview.SetFocus(ml.chat.messageInput)
+	ml.chat.composer.sendMessageData = data
+	ml.chat.composer.SetTitle(title + name)
+	return tview.SetFocus(ml.chat.composer)
 }
 
 // editLastOwnMessage finds the newest loaded message from the current user and
@@ -1280,7 +1287,7 @@ func (ml *messagesList) editLastOwnMessage() tview.Cmd {
 		if ml.messages[i].Author.ID != me.ID {
 			continue
 		}
-		ml.chat.messageInput.sendMessageData = &api.SendMessageData{}
+		ml.chat.composer.sendMessageData = &api.SendMessageData{}
 		ml.SetCursor(i)
 		return ml.editSelectedMessage()
 	}
@@ -1288,22 +1295,20 @@ func (ml *messagesList) editLastOwnMessage() tview.Cmd {
 }
 
 func (ml *messagesList) editSelectedMessage() tview.Cmd {
-	message, err := ml.selectedMessage()
-	if err != nil {
-		slog.Error("failed to get selected message", "err", err)
+	selectedMessage, ok := ml.selectedMessage()
+	if !ok {
 		return nil
 	}
 
-	me, _ := ml.chat.state.Cabinet.Me()
-	if message.Author.ID != me.ID {
-		slog.Error("failed to edit message; not the author", "channel_id", message.ChannelID, "message_id", message.ID)
+	if !ml.chat.isMe(selectedMessage.Author.ID) {
+		slog.Error("failed to edit message; not the author", "channel_id", selectedMessage.ChannelID, "message_id", selectedMessage.ID)
 		return nil
 	}
 
-	ml.chat.messageInput.SetTitle("Editing")
-	ml.chat.messageInput.edit = true
-	ml.chat.messageInput.SetText(message.Content, true)
-	return tview.SetFocus(ml.chat.messageInput)
+	ml.chat.composer.SetTitle("Editing")
+	ml.chat.composer.edit = true
+	ml.chat.composer.SetText(selectedMessage.Content, true)
+	return tview.SetFocus(ml.chat.composer)
 }
 
 func (ml *messagesList) confirmDelete() {
@@ -1323,16 +1328,14 @@ func (ml *messagesList) confirmDelete() {
 }
 
 func (ml *messagesList) deleteSelectedMessage() tview.Cmd {
-	selectedMessage, err := ml.selectedMessage()
-	if err != nil {
-		slog.Error("failed to get selected message", "err", err)
+	selectedMessage, ok := ml.selectedMessage()
+	if !ok {
 		return nil
 	}
 
 	return func() tview.Msg {
 		if selectedMessage.GuildID.IsValid() {
-			me, _ := ml.chat.state.Cabinet.Me()
-			if selectedMessage.Author.ID != me.ID && !ml.chat.state.HasPermissions(selectedMessage.ChannelID, discord.PermissionManageMessages) {
+			if !ml.chat.isMe(selectedMessage.Author.ID) && !ml.chat.state.HasPermissions(selectedMessage.ChannelID, discord.PermissionManageMessages) {
 				slog.Error("failed to delete message; missing relevant permissions", "channel_id", selectedMessage.ChannelID, "message_id", selectedMessage.ID)
 				return nil
 			}
@@ -1423,9 +1426,8 @@ func (ml *messagesList) ShortHelp() []keybind.Keybind {
 		cfg.Cancel.Keybind,
 	}
 
-	if msg, err := ml.selectedMessage(); err == nil {
-		me, _ := ml.chat.state.Cabinet.Me()
-		if msg.Author.ID != me.ID {
+	if selectedMessage, ok := ml.selectedMessage(); ok {
+		if !ml.chat.isMe(selectedMessage.Author.ID) {
 			help = append(help, cfg.Reply.Keybind)
 		}
 	}
@@ -1441,17 +1443,16 @@ func (ml *messagesList) FullHelp() [][]keybind.Keybind {
 	canEdit := false
 	canDelete := false
 	canOpen := false
-	if msg, err := ml.selectedMessage(); err == nil {
-		canSelectReply = msg.ReferencedMessage != nil
-		canOpen = len(messageURLs(*msg)) != 0 || len(msg.Attachments) != 0
+	if selectedMessage, ok := ml.selectedMessage(); ok {
+		canSelectReply = selectedMessage.ReferencedMessage != nil
+		canOpen = len(messageURLs(*selectedMessage)) != 0 || len(selectedMessage.Attachments) != 0
 
-		me, _ := ml.chat.state.Cabinet.Me()
-		canReply = msg.Author.ID != me.ID
-		canEdit = msg.Author.ID == me.ID
+		canEdit = ml.chat.isMe(selectedMessage.Author.ID)
+		canReply = !canEdit
 		canDelete = canEdit
 		if !canDelete {
-			selected := ml.chat.SelectedChannel()
-			canDelete = selected != nil && ml.chat.state.HasPermissions(selected.ID, discord.PermissionManageMessages)
+			selectedChannel, ok := ml.chat.SelectedChannel()
+			canDelete = ok && ml.chat.state.HasPermissions(selectedChannel.ID, discord.PermissionManageMessages)
 		}
 	}
 

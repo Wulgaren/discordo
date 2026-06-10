@@ -74,6 +74,12 @@ type (
 		Separator        string `toml:"separator"`
 	}
 
+	ComposerConfig struct {
+		// MaxHeight caps how tall (in newline-separated rows) the input grows before it starts scrolling internally.
+		// Must be >= 1; values <= 0 fall back to the default.
+		MaxHeight int `toml:"max_height"`
+	}
+
 	SidebarMarkersConfig struct {
 		Expanded  string `toml:"expanded"`
 		Collapsed string `toml:"collapsed"`
@@ -115,6 +121,7 @@ type (
 		Notifications   Notifications   `toml:"notifications"`
 		TypingIndicator TypingIndicator `toml:"typing_indicator"`
 		Sidebar         SidebarConfig   `toml:"sidebar"`
+		Composer        ComposerConfig  `toml:"composer"`
 
 		Icons Icons `toml:"icons"`
 
@@ -129,10 +136,7 @@ var defaultCfg []byte
 func DefaultPath() string {
 	path, err := os.UserConfigDir()
 	if err != nil {
-		slog.Info(
-			"user config dir cannot be determined; falling back to the current dir",
-			"err", err,
-		)
+		slog.Info("user config dir cannot be determined; falling back to the current dir", "err", err)
 		path = "."
 	}
 
@@ -149,20 +153,13 @@ func Load(path string) (*Config, error) {
 	}
 
 	file, err := os.Open(path)
-	if os.IsNotExist(err) {
-		slog.Info(
-			"config file does not exist, falling back to the default config",
-			"path",
-			path,
-			"err",
-			err,
-		)
-	} else {
-		if err != nil {
-			return nil, fmt.Errorf("failed to open config file: %w", err)
-		}
+	switch {
+	case os.IsNotExist(err):
+		slog.Info("config file does not exist, falling back to the default config", "path", path, "err", err)
+	case err != nil:
+		return nil, fmt.Errorf("failed to open config file: %w", err)
+	default:
 		defer file.Close()
-
 		if _, err := toml.NewDecoder(file).Decode(&cfg); err != nil {
 			return nil, fmt.Errorf("failed to decode config: %w", err)
 		}
@@ -181,18 +178,16 @@ func applyDefaults(cfg *Config) {
 		cfg.Status = discord.UnknownStatus
 	}
 
+	if cfg.Composer.MaxHeight <= 0 {
+		cfg.Composer.MaxHeight = 10
+	}
+
 	if cfg.DateSeparator.Format == "" {
 		cfg.DateSeparator.Format = "January 2, 2006"
 	}
-	if cfg.DateSeparator.Character == "" {
+	if r, _ := utf8.DecodeRuneInString(cfg.DateSeparator.Character); r == utf8.RuneError {
 		cfg.DateSeparator.Character = "─"
-		return
+	} else {
+		cfg.DateSeparator.Character = string(r)
 	}
-
-	r, _ := utf8.DecodeRuneInString(cfg.DateSeparator.Character)
-	if r == utf8.RuneError {
-		cfg.DateSeparator.Character = "─"
-		return
-	}
-	cfg.DateSeparator.Character = string(r)
 }

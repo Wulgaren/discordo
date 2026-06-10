@@ -6,6 +6,7 @@ import (
 
 	"github.com/ayn2op/discordo/internal/notifications"
 	"github.com/ayn2op/tview"
+	"github.com/ayn2op/tview/tree"
 	"github.com/diamondburned/arikawa/v3/discord"
 	"github.com/diamondburned/arikawa/v3/gateway"
 	"github.com/diamondburned/arikawa/v3/utils/httputil/httpdriver"
@@ -41,7 +42,7 @@ func (m *Model) onReady(event *gateway.ReadyEvent) tview.Cmd {
 func (m *Model) populateGuildsTree(settings gateway.UserSettings) {
 	m.guildsTree.resetNodeIndex()
 
-	dmNode := tview.NewTreeNode("Direct Messages").SetReference(dmNode{}).SetExpandable(true).SetExpanded(false)
+	dmNode := tree.NewNode("Direct Messages").SetReference(dmNode{}).SetExpandable(true).SetExpanded(false)
 	m.guildsTree.dmRootNode = dmNode
 
 	root := m.guildsTree.
@@ -72,6 +73,7 @@ func (m *Model) populateGuildsTree(settings gateway.UserSettings) {
 	// Use GuildPositions for ordering (it's the canonical order).
 	// Guilds not in any folder are "orphans" - add them directly to root.
 	positions := settings.GuildPositions
+	// GuildPositions is normally set; fall back to event order if not.
 	if len(positions) == 0 {
 		positions = make([]discord.GuildID, 0, len(guilds))
 		for _, guild := range guilds {
@@ -80,6 +82,7 @@ func (m *Model) populateGuildsTree(settings gateway.UserSettings) {
 	}
 
 	for _, guildID := range positions {
+		// Already handled in folder processing below.
 		if guildsInFolders[guildID] {
 			continue
 		}
@@ -104,12 +107,11 @@ func (m *Model) onMessageCreate(message *gateway.MessageCreateEvent) tview.Cmd {
 
 	me, err := m.state.Cabinet.Me()
 	if err == nil && message.Author.ID != me.ID {
-		// Read state is updated in ningen's sync handler; restyle sidebar here.
 		cmds = append(cmds, m.refreshUnreadStylesCmd(message.ChannelID))
 	}
 
-	selectedChannel := m.SelectedChannel()
-	if selectedChannel != nil && selectedChannel.ID == message.ChannelID {
+	selectedChannel, ok := m.SelectedChannel()
+	if ok && selectedChannel.ID == message.ChannelID {
 		m.removeTyper(message.Author.ID)
 		m.messagesList.addMessage(message.Message)
 	}
@@ -135,60 +137,54 @@ func (m *Model) notify(message gateway.MessageCreateEvent) tview.Cmd {
 }
 
 func (m *Model) onMessageUpdate(message *gateway.MessageUpdateEvent) {
-	selectedChannel := m.SelectedChannel()
-	if selectedChannel == nil {
+	selectedChannel, ok := m.SelectedChannel()
+	if !ok || selectedChannel.ID != message.ChannelID {
 		return
 	}
 
-	if selectedChannel.ID == message.ChannelID {
-		index := slices.IndexFunc(m.messagesList.messages, func(m discord.Message) bool {
-			return m.ID == message.ID
-		})
-		if index < 0 {
-			return
-		}
-
-		m.messagesList.setMessage(index, message.Message)
+	index := slices.IndexFunc(m.messagesList.messages, func(m discord.Message) bool {
+		return m.ID == message.ID
+	})
+	if index < 0 {
+		return
 	}
+
+	m.messagesList.setMessage(index, message.Message)
 }
 
 func (m *Model) onMessageDelete(message *gateway.MessageDeleteEvent) {
-	selectedChannel := m.SelectedChannel()
-	if selectedChannel == nil {
+	selectedChannel, ok := m.SelectedChannel()
+	if !ok || selectedChannel.ID != message.ChannelID {
 		return
 	}
 
-	if selectedChannel.ID == message.ChannelID {
-		prevCursor := m.messagesList.Cursor()
-		deletedIndex := slices.IndexFunc(m.messagesList.messages, func(m discord.Message) bool {
-			return m.ID == message.ID
-		})
-		if deletedIndex < 0 {
-			return
-		}
+	prevCursor := m.messagesList.Cursor()
+	deletedIndex := slices.IndexFunc(m.messagesList.messages, func(m discord.Message) bool {
+		return m.ID == message.ID
+	})
+	if deletedIndex < 0 {
+		return
+	}
 
-		m.messagesList.deleteMessage(deletedIndex)
+	m.messagesList.deleteMessage(deletedIndex)
 
-		// Keep cursor stable when possible after removal.
-		newCursor := prevCursor
-		if prevCursor == deletedIndex {
-			// Prefer previous item; fall forward if we deleted the first.
-			newCursor = deletedIndex - 1
-			if newCursor < 0 {
-				if deletedIndex < len(m.messagesList.messages) {
-					newCursor = deletedIndex
-				} else {
-					newCursor = -1
-				}
-			}
-		} else if prevCursor > deletedIndex {
-			// Shift back since the list shrank before the cursor.
-			newCursor = prevCursor - 1
+	newCursor := cursorAfterDelete(prevCursor, deletedIndex, len(m.messagesList.messages))
+	if newCursor != prevCursor {
+		m.messagesList.SetCursor(newCursor)
+	}
+}
+
+func cursorAfterDelete(prevCursor, deletedIndex, remaining int) int {
+	switch {
+	case prevCursor > deletedIndex:
+		return prevCursor - 1
+	case prevCursor == deletedIndex:
+		if prev := deletedIndex - 1; prev >= 0 {
+			return prev
 		}
-		if newCursor != prevCursor {
-			// Avoid redundant cursor updates if nothing changed.
-			m.messagesList.SetCursor(newCursor)
-		}
+		return min(deletedIndex, remaining-1)
+	default:
+		return prevCursor
 	}
 }
 
@@ -197,21 +193,16 @@ func (m *Model) onGuildMembersChunk(event *gateway.GuildMembersChunkEvent) {
 }
 
 func (m *Model) onGuildMemberRemove(event *gateway.GuildMemberRemoveEvent) {
-	m.messageInput.cache.Invalidate(event.GuildID.String()+" "+event.User.Username, m.state.MemberState.SearchLimit)
+	m.composer.cache.Invalidate(event.GuildID.String()+" "+event.User.Username, m.state.MemberState.SearchLimit)
 }
 
 func (m *Model) onTypingStart(event *gateway.TypingStartEvent) {
-	selectedChannel := m.SelectedChannel()
-	if selectedChannel == nil {
+	selectedChannel, ok := m.SelectedChannel()
+	if !ok || selectedChannel.ID != event.ChannelID {
 		return
 	}
 
-	if selectedChannel.ID != event.ChannelID {
-		return
-	}
-
-	me, _ := m.state.Cabinet.Me()
-	if event.UserID == me.ID {
+	if m.isMe(event.UserID) {
 		return
 	}
 

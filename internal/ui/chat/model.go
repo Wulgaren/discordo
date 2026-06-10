@@ -43,12 +43,12 @@ type Model struct {
 
 	// guildsTree (sidebar) + rightFlex
 	mainFlex *flex.Model
-	// messagesList + messageInput
+	// messagesList + composer
 	rightFlex *flex.Model
 
 	guildsTree     *guildsTree
 	messagesList   *messagesList
-	messageInput   *messageInput
+	composer       *composer
 	channelsPicker *channelsPicker
 
 	selectedChannel   *discord.Channel
@@ -82,7 +82,7 @@ func NewModel(app *tview.Application, cfg *config.Config, token string) *Model {
 
 	m.guildsTree = newGuildsTree(cfg, m)
 	m.messagesList = newMessagesList(cfg, m)
-	m.messageInput = newMessageInput(cfg, m)
+	m.composer = newComposer(cfg, m)
 	m.channelsPicker = newChannelsPicker(cfg, m)
 
 	identifyProps := http.IdentifyProperties()
@@ -111,16 +111,21 @@ func NewModel(app *tview.Application, cfg *config.Config, token string) *Model {
 	return m
 }
 
-func (m *Model) SelectedChannel() *discord.Channel {
+func (m *Model) SelectedChannel() (*discord.Channel, bool) {
 	m.selectedChannelMu.RLock()
 	defer m.selectedChannelMu.RUnlock()
-	return m.selectedChannel
+	return m.selectedChannel, m.selectedChannel != nil
 }
 
 func (m *Model) SetSelectedChannel(channel *discord.Channel) {
 	m.selectedChannelMu.Lock()
 	m.selectedChannel = channel
 	m.selectedChannelMu.Unlock()
+}
+
+func (m *Model) isMe(id discord.UserID) bool {
+	me, _ := m.state.Cabinet.Me()
+	return me != nil && id == me.ID
 }
 
 func (m *Model) buildLayout() {
@@ -131,14 +136,15 @@ func (m *Model) buildLayout() {
 	m.rightFlex.
 		SetDirection(flex.DirectionRow).
 		AddItem(m.messagesList, 0, 1, false).
-		AddItem(m.messageInput, 3, 1, false)
+		AddItem(m.composer, 3, 1, false)
+	// The guilds tree is always focused first at start-up.
 	m.mainFlex.
 		AddItem(m.guildsTree, 0, 1, true).
 		AddItem(m.rightFlex, 0, 4, false)
 
 	m.AddLayer(m.mainFlex, layers.WithName(flexLayerName), layers.WithResize(true), layers.WithVisible(true))
 	m.AddLayer(
-		m.messageInput.mentionsList,
+		m.composer.mentionsList,
 		layers.WithName(mentionsListLayerName),
 		layers.WithResize(false),
 		layers.WithVisible(false),
@@ -193,20 +199,23 @@ func (m *Model) focusGuildsTree() tview.Cmd {
 	return nil
 }
 
-// focusMessageInput dismisses any overlays that would otherwise cover or
-// steal input from the message input before focusing it.
-func (m *Model) focusMessageInput() tview.Cmd {
-	m.messageInput.removeMentionsList()
+// focusComposer dismisses any overlays that would otherwise cover or
+// steal input from the composer before focusing it.
+func (m *Model) focusComposer() tview.Cmd {
+	if m.composer.GetDisabled() {
+		return nil
+	}
+	m.composer.removeMentionsList()
 	if m.HasLayer(channelsPickerLayerName) {
 		m.closePicker()
 	}
 	if m.HasLayer(attachmentsPickerLayerName) {
 		m.RemoveLayer(attachmentsPickerLayerName)
 	}
-	return tview.SetFocus(m.messageInput)
+	return tview.SetFocus(m.composer)
 }
 
-// matchesFocusMessageInput reports whether msg should trigger focus_message_input.
+// matchesFocusComposer reports whether msg should trigger focus_composer.
 //
 // Legacy terminals (e.g. macOS Terminal.app) cannot distinguish Ctrl+I from
 // Tab: both arrive as byte 0x09, which tcell decodes as a plain KeyTab. When
@@ -216,24 +225,23 @@ func (m *Model) focusMessageInput() tview.Cmd {
 // instead of whitelisting focus targets keeps the shortcut working when focus
 // ends up in an unexpected state, e.g. after opening a link and returning to
 // the app.
-func (m *Model) matchesFocusMessageInput(msg *tcell.EventKey) bool {
-	if keybind.Matches(msg, m.cfg.Keybinds.FocusMessageInput.Keybind) {
+func (m *Model) matchesFocusComposer(msg *tcell.EventKey) bool {
+	if keybind.Matches(msg, m.cfg.Keybinds.FocusComposer.Keybind) {
 		return true
 	}
 	if msg.Key() != tcell.KeyTab || msg.Modifiers() != 0 {
 		return false
 	}
-	if !slices.Contains(m.cfg.Keybinds.FocusMessageInput.Keys(), "ctrl+i") {
+	if !slices.Contains(m.cfg.Keybinds.FocusComposer.Keys(), "ctrl+i") {
 		return false
 	}
-	// No channel selected or no send permission; leave Tab to other widgets.
-	if m.messageInput.GetDisabled() {
+	if m.composer.GetDisabled() {
 		return false
 	}
 	if m.HasLayer(confirmModalLayerName) {
 		return false
 	}
-	if m.app.Focused() == m.messageInput && m.messageInput.mentionTabPending() {
+	if m.app.Focused() == m.composer && m.composer.mentionTabPending() {
 		return false
 	}
 	return true
@@ -247,13 +255,13 @@ func (m *Model) globalKeyCmd(msg tview.Msg) tview.Cmd {
 	}
 	switch {
 	case keybind.Matches(keyMsg, m.cfg.Keybinds.FocusGuildsTree.Keybind):
-		m.messageInput.removeMentionsList()
+		m.composer.removeMentionsList()
 		return m.focusGuildsTree()
 	case keybind.Matches(keyMsg, m.cfg.Keybinds.FocusMessagesList.Keybind):
-		m.messageInput.removeMentionsList()
+		m.composer.removeMentionsList()
 		return m.focusMessagesList()
-	case m.matchesFocusMessageInput(keyMsg):
-		return m.focusMessageInput()
+	case m.matchesFocusComposer(keyMsg):
+		return m.focusComposer()
 	case keybind.Matches(keyMsg, m.cfg.Keybinds.FocusPrevious.Keybind):
 		return m.focusPrevious()
 	case keybind.Matches(keyMsg, m.cfg.Keybinds.FocusNext.Keybind):
@@ -275,7 +283,7 @@ func (m *Model) focusMessagesList() tview.Cmd {
 func (m *Model) focusPrevious() tview.Cmd {
 	switch m.app.Focused() {
 	case m.guildsTree:
-		if cmd := m.focusMessageInput(); cmd != nil {
+		if cmd := m.focusComposer(); cmd != nil {
 			return cmd
 		}
 		return m.focusMessagesList()
@@ -284,11 +292,11 @@ func (m *Model) focusPrevious() tview.Cmd {
 		if cmd := m.focusGuildsTree(); cmd != nil {
 			return cmd
 		}
-		if cmd := m.focusMessageInput(); cmd != nil {
+		if cmd := m.focusComposer(); cmd != nil {
 			return cmd
 		}
 		return m.focusMessagesList()
-	case m.messageInput:
+	case m.composer:
 		return m.focusMessagesList()
 	}
 	return nil
@@ -300,13 +308,13 @@ func (m *Model) focusNext() tview.Cmd {
 		return m.focusMessagesList()
 	case m.messagesList:
 		// Fallback when input/guilds are unavailable.
-		if cmd := m.focusMessageInput(); cmd != nil {
+		if cmd := m.focusComposer(); cmd != nil {
 			return cmd
 		}
 		if cmd := m.focusGuildsTree(); cmd != nil {
 			return cmd
 		}
-	case m.messageInput:
+	case m.composer:
 		if cmd := m.focusGuildsTree(); cmd != nil {
 			return cmd
 		}
@@ -360,7 +368,7 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 
 		m.SetSelectedChannel(&msg.Channel)
 		m.clearTypers()
-		m.messageInput.stopTypingTimer()
+		m.composer.stopTypingTimer()
 
 		m.messagesList.reset()
 		m.messagesList.setTitle(msg.Channel)
@@ -369,7 +377,7 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 
 		isDM := msg.Channel.Type == discord.DirectMessage || msg.Channel.Type == discord.GroupDM
 		hasNoPerm := !isDM && !m.state.HasPermissions(msg.Channel.ID, discord.PermissionSendMessages)
-		m.messageInput.SetDisabled(hasNoPerm)
+		m.composer.SetDisabled(hasNoPerm)
 
 		text := "Message..."
 		focusCmd := tview.Cmd(nil)
@@ -377,9 +385,9 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 		if hasNoPerm {
 			text = "You do not have permission to send messages in this channel."
 		} else if m.cfg.AutoFocus {
-			focusCmd = m.focusMessageInput()
+			focusCmd = m.focusComposer()
 		}
-		m.messageInput.SetPlaceholder(tview.NewLine(tview.NewSegment(text, tcell.StyleDefault.Dim(true))))
+		m.composer.SetPlaceholder(tview.NewLine(tview.NewSegment(text, tcell.StyleDefault.Dim(true))))
 		return focusCmd
 	case QuitMsg:
 		return m.closeState()
@@ -405,7 +413,7 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 	case tabSuggestMsg:
 		// Member search completes in a command goroutine; resume suggestion
 		// generation on the update loop to keep UI mutations serialized.
-		return m.messageInput.Update(msg)
+		return m.composer.Update(msg)
 	}
 	return m.Layers.Update(msg)
 }
@@ -463,8 +471,8 @@ func (m *Model) removeTyper(userID discord.UserID) {
 }
 
 func (m *Model) updateFooter() {
-	selectedChannel := m.SelectedChannel()
-	if selectedChannel == nil {
+	selectedChannel, ok := m.SelectedChannel()
+	if !ok {
 		return
 	}
 	guildID := selectedChannel.GuildID
